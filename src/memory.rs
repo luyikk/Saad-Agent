@@ -83,8 +83,10 @@ impl ConversationMemory {
     /// 扩展消息历史，自动过滤无用的历史记录：
     ///
     /// 1. **空消息** — 丢弃没有任何文本内容的消息
-    /// 2. **连续重复** — 丢弃与上一条完全相同的消息（常见于重试/循环）
-    /// 3. **过长截断** — 单条消息超过 `MAX_MESSAGE_CHARS` 字符时自动截断
+    /// 2. **纯工具调用** — 丢弃 Assistant 仅发出工具调用（无文本/推理）的中间步骤
+    /// 3. **无用的工具结果** — 丢弃内容为空的 ToolResult 消息
+    /// 4. **连续重复** — 丢弃与上一条完全相同的消息（常见于重试/循环）
+    /// 5. **过长截断** — 单条消息超过 `MAX_MESSAGE_CHARS` 字符时自动截断
     pub fn extend(&mut self, new_messages: &[Message]) {
         for msg in new_messages {
             // ① 跳过空消息
@@ -93,11 +95,23 @@ impl ConversationMemory {
                 continue;
             }
 
-            // ② 克隆后截断过长文本
+            // ② 跳过纯工具调用（Assistant 只发 ToolCall，没有文本/推理）
+            if is_pure_tool_call(msg) {
+                tracing::debug!("跳过纯工具调用: role={}", message_role_name(msg));
+                continue;
+            }
+
+            // ③ 跳过无用的工具结果（ToolResult 内容全为空）
+            if is_useless_tool_result(msg) {
+                tracing::debug!("跳过无用的工具结果: role={}", message_role_name(msg));
+                continue;
+            }
+
+            // ④ 克隆后截断过长文本
             let mut filtered = msg.clone();
             truncate_message_texts(&mut filtered);
 
-            // ③ 去重：跳过与上一条完全相同的消息
+            // ⑤ 去重：跳过与上一条完全相同的消息
             if self.messages.last() == Some(&filtered) {
                 tracing::debug!("跳过重复消息: role={}", message_role_name(msg));
                 continue;
@@ -244,6 +258,62 @@ fn is_message_empty(msg: &Message) -> bool {
             // ToolCall / Reasoning / Image 视为有内容
             _ => false,
         }),
+    }
+}
+
+/// 判断 Assistant 消息是否为"纯工具调用"：只有 ToolCall，没有文本或推理
+///
+/// 这类消息是 Agent 循环中的中间步骤（如 "调用 read_file"），
+/// 真正的信息在 ToolResult 中，保留 ToolCall 只会浪费 token。
+fn is_pure_tool_call(msg: &Message) -> bool {
+    match msg {
+        Message::Assistant { content, .. } => {
+            if content.is_empty() {
+                return false; // 空消息由 is_message_empty 处理
+            }
+            content
+                .iter()
+                .all(|c| matches!(c, AssistantContent::ToolCall(_)))
+        }
+        _ => false,
+    }
+}
+
+/// 判断 User 消息是否只包含"无用"的工具结果
+///
+/// 无用 = 所有 ToolResult 内容都是空文本（无任何实际结果）。
+/// - 含用户文本的消息 → 有用（保留）
+/// - 含图片结果 → 有用（保留）  
+/// - ToolResult 为空或全是空字符串 → 无用（丢弃）
+fn is_useless_tool_result(msg: &Message) -> bool {
+    match msg {
+        Message::User { content } => {
+            // 如果消息里有用户自己的文本（非 ToolResult），说明不是纯工具结果，保留
+            let has_user_text = content
+                .iter()
+                .any(|c| matches!(c, UserContent::Text(t) if !t.text.trim().is_empty()));
+            if has_user_text {
+                return false;
+            }
+            // 检查是否所有 ToolResult 内容都为空文本
+            let all_tool_results = content
+                .iter()
+                .all(|c| matches!(c, UserContent::ToolResult(_)));
+            if !all_tool_results {
+                // 有其他类型内容（Image/Audio/Video/Document），视为有用
+                return false;
+            }
+            // 所有内容都是 ToolResult，且至少有一个非空的才算有用
+            !content.iter().any(|c| match c {
+                UserContent::ToolResult(tr) => tr.content.iter().any(|tc| match tc {
+                    ToolResultContent::Text(t) => !t.text.trim().is_empty(),
+                    ToolResultContent::Image(_) => true, // 图片结果视为有用
+                }),
+                _ => false,
+            })
+            // 注意：如果 content 为空（没有 ToolResult），那走不到这里，已被 is_message_empty 拦截
+        }
+        _ => false,
     }
 }
 

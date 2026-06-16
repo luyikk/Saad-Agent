@@ -7,11 +7,11 @@ use std::sync::OnceLock;
 
 use console::style;
 use encoding_rs::GBK;
+use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use regex::Regex;
 use std::collections::HashSet;
 
 use crate::error::AgentError;
@@ -148,8 +148,6 @@ fn confirm_dangerous_command(cmd: &str) -> Result<(), AgentError> {
     }
 }
 
-
-
 /// 检测命令是否匹配危险模式，返回危险原因描述
 fn detect_dangerous_pattern(cmd: &str) -> Option<String> {
     let cmd_trimmed = cmd.trim();
@@ -157,22 +155,28 @@ fn detect_dangerous_pattern(cmd: &str) -> Option<String> {
         return None;
     }
 
-    // 1. 拦截 Shell 注入与命令链接符（防止拼接恶意命令）
+    // 1. 拦截真正危险的 Shell 注入与命令替换（放行合法的 ; 和 |）
     let injection_patterns = [
-        r"[;&|`]",              // 拦截 ; & | ` 等命令连接符或反引号
-        r"\$\(",                // 拦截命令替换 $(...)
-        r">\s*/",               // 拦截重定向到绝对路径
+        r"`",     // 拦截反引号命令替换 `...`
+        r"\$\(",  // 拦截命令替换 $(...)
+        r">\s*/", // 拦截重定向到绝对路径 (如 > /etc/passwd)
     ];
     for pattern in &injection_patterns {
         if Regex::new(pattern).unwrap().is_match(cmd_trimmed) {
-            return Some(format!("检测到潜在的命令注入或重定向操作 — 匹配模式: \"{}\"", pattern));
+            return Some(format!(
+                "检测到潜在的命令注入或危险重定向 — 匹配模式: \"{}\"",
+                pattern
+            ));
         }
     }
 
     // 2. 跨平台高危模式（使用正则匹配参数顺序和空格）
     let cross_platform_patterns: &[(&str, &str)] = &[
         (r"\brm\s+.*-r.*-f.*\s+/\b", "递归强制删除根目录 (rm -rf /)"),
-        (r"\brm\s+.*--no-preserve-root\b", "递归删除根目录（绕过保护）"),
+        (
+            r"\brm\s+.*--no-preserve-root\b",
+            "递归删除根目录（绕过保护）",
+        ),
         (r">\s*/dev/sd[a-z]", "覆写磁盘设备"),
         (r"\bmkfs\.", "格式化文件系统"),
         (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", "Fork 炸弹"),
@@ -183,27 +187,135 @@ fn detect_dangerous_pattern(cmd: &str) -> Option<String> {
         }
     }
 
-    // 3. 提取基础命令并进行白名单校验（防御核心）
-    let base_cmd = cmd_trimmed.split_whitespace().next().unwrap_or("");
-    // 提取命令名称，处理 /usr/bin/rm 这种绝对路径的情况
-    let cmd_name = base_cmd.split('/').last().unwrap_or("");
-
-    // 定义安全白名单（根据实际需求扩展）
+    // 3. 构建全栈开发安全白名单
     let allowed_commands: HashSet<&str> = [
-        "ls", "pwd", "cat", "grep", "head", "tail", "ps", "df", "du", "whoami",
-        "date", "uptime", "free", "top", "netstat", "ss", "ip", "hostname", "echo",
-    ].iter().cloned().collect();
+        // 基础文件与目录操作
+        "ls",
+        "dir",
+        "pwd",
+        "cd",
+        "tree",
+        "cat",
+        "head",
+        "tail",
+        "touch",
+        "mkdir",
+        "cp",
+        "mv",
+        "rm",
+        // 文本搜索与处理
+        "grep",
+        "find",
+        "awk",
+        "sed",
+        "wc",
+        "sort",
+        "uniq",
+        "diff",
+        // 系统状态与网络调试
+        "ps",
+        "top",
+        "htop",
+        "df",
+        "du",
+        "free",
+        "uname",
+        "whoami",
+        "hostname",
+        "date",
+        "uptime",
+        "env",
+        "echo",
+        "ping",
+        "curl",
+        "wget",
+        "netstat",
+        "ss",
+        "ip",
+        "ifconfig",
+        "nslookup",
+        "dig",
+        "traceroute",
+        "telnet",
+        // Rust 生态
+        "cargo",
+        "rustc",
+        "rustup",
+        "clippy",
+        "rustfmt",
+        // Node.js 生态
+        "node",
+        "npm",
+        "yarn",
+        "pnpm",
+        "npx",
+        "bun",
+        "tsc",
+        // Python 生态
+        "python",
+        "python3",
+        "pip",
+        "pip3",
+        "poetry",
+        "conda",
+        "mypy",
+        "pytest",
+        // 版本控制与工具链
+        "git",
+        "git-lfs",
+        "tar",
+        "unzip",
+        "zip",
+        "jq",
+        "ffmpeg",
+        "make",
+        // 容器化与云服务
+        "docker",
+        "docker-compose",
+        "kubectl",
+        "helm",
+        // Windows / PowerShell 专属
+        "Select-Object",
+        "Where-Object",
+        "ForEach-Object",
+        "Out-File",
+        "ConvertTo-Json",
+        "ConvertFrom-Json",
+        "Get-Content",
+        "Set-Location",
+    ]
+    .iter()
+    .cloned()
+    .collect();
 
-    if !cmd_name.is_empty() && !allowed_commands.contains(cmd_name) {
-        return Some(format!("命令 \"{}\" 不在允许执行的白名单中", cmd_name));
+    // 4. 按 ; 或 | 拆分命令，确保每个子命令都在白名单内
+    let split_pattern = Regex::new(r"\s*[;|]\s*").unwrap();
+    let sub_commands = split_pattern.split(cmd_trimmed);
+
+    for sub_cmd in sub_commands {
+        let sub_cmd = sub_cmd.trim();
+        if sub_cmd.is_empty() {
+            continue;
+        }
+
+        // 提取基础命令名称，兼容绝对路径（如 /usr/bin/rm）
+        let base_cmd = sub_cmd.split_whitespace().next().unwrap_or("");
+        let cmd_name = base_cmd.split('/').last().unwrap_or("");
+
+        if !cmd_name.is_empty() && !allowed_commands.contains(cmd_name) {
+            return Some(format!("子命令 \"{}\" 不在允许执行的白名单中", cmd_name));
+        }
     }
 
-    // 4. 平台特有检测（示例：Unix 权限修改）
+    // 5. 平台特有检测（示例：Unix 权限修改）
     #[cfg(not(target_os = "windows"))]
     {
         let unix_patterns: &[(&str, &str)] = &[
             (r"\bchmod\s+777\s+/\b", "修改根目录权限为 777"),
-            (r"\bchown\s+-R\s+root:root\s+/\b", "递归修改根目录所有者为 root"),
+            (
+                r"\bchown\s+-R\s+root:root\s+/\b",
+                "递归修改根目录所有者为 root",
+            ),
         ];
         for (pattern, desc) in unix_patterns {
             if Regex::new(pattern).unwrap().is_match(cmd_trimmed) {

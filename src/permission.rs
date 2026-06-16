@@ -197,8 +197,7 @@ pub fn confirm_cross_directory(detail: &str) -> Result<(), AgentError> {
     crate::ui::select_permission("跨目录文件访问:", &action_desc).map_or_else(
         || Err(AgentError::Other("权限选择已取消".to_string())),
         |selection| {
-            handle_selection(selection, &format!("跨目录访问: {detail}"))
-                .map_err(AgentError::Other)
+            handle_selection(selection, &format!("跨目录访问: {detail}")).map_err(AgentError::Other)
         },
     )
 }
