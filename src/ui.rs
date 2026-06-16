@@ -271,6 +271,8 @@ pub struct StreamDisplay {
     line_w: usize,
     /// 工具调用计数器（用于编号）
     tool_call_count: u32,
+    /// 最大对话轮次（用于显示进度如 #1/100）
+    max_turns: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,13 +291,14 @@ enum StreamPhase {
 
 impl StreamDisplay {
     /// 创建新的流式渲染器
-    pub fn new() -> Self {
+    pub fn new(max_turns: usize) -> Self {
         let width = Term::stdout().size().1 as usize;
         Self {
             term: Term::stdout(),
             state: StreamPhase::Idle,
             line_w: width.min(80),
             tool_call_count: 0,
+            max_turns,
         }
     }
 
@@ -451,9 +454,9 @@ impl StreamDisplay {
         self.print_tool_result(success, summary)
     }
 
-    /// 处理 CompletionCall：立即打印本轮 token 用量（Claude Code CLI 风格）
+    /// 处理 CompletionCall：打印本轮 token 用量，含进度 #n/max
     pub fn on_completion_call(&mut self, call_index: u32, usage: Option<Usage>) {
-        // Claude Code CLI 风格: `  ⏺  Turn 1 · 1.2k input · 0.3k output`
+        // 格式: `  ⏺  Turn #1/100 · 1.2k input · 0.3k output`
         if let Some(u) = usage {
             let turn = call_index + 1; // call_index 是 0-based，显示用 1-based
             let _ = writeln!(self.term);
@@ -462,7 +465,7 @@ impl StreamDisplay {
                 "  {}  {} {}  {} {}  {} {}",
                 s_dim("⏺"),
                 s_dim("Turn"),
-                s_dim(&turn.to_string()),
+                s_dim(&format!("#{}/{}", turn, self.max_turns)),
                 s_dim("·"),
                 s_dim(&format!("{} input", fmt_tokens(u.input_tokens))),
                 s_dim("·"),
@@ -499,15 +502,69 @@ impl StreamDisplay {
     }
 }
 
-/// 截断字符串到指定宽度（按字符数，非字节）
+// ── 辅助函数 ──
+
+/// 辅助函数：安全截断字符串，使显示宽度不超过 max_width。
 ///
-/// 先检查是否需要截断，避免不必要的分配。
-pub fn truncate_str(s: &str, max_chars: usize) -> Cow<'_, str> {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
-        Cow::Borrowed(s)
-    } else {
-        let truncated: String = chars.into_iter().take(max_chars).collect();
-        Cow::Owned(format!("{truncated}..."))
+/// 使用 `console::measure_text_width` 而非 `unicode_width` 直接计算，
+/// 保证与 console crate 的宽度计算一致，避免中文被错误截断。
+fn truncate_str(s: &str, max_width: usize) -> Cow<'_, str> {
+    if max_width == 0 {
+        return Cow::Borrowed("");
     }
+
+    let total_w = console::measure_text_width(s);
+    if total_w <= max_width {
+        return Cow::Borrowed(s);
+    }
+
+    // 二分查找合适的截断位置
+    let mut lo = 0;
+    let mut hi = s.len();
+
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        // 确保 mid 落在字符边界
+        let safe_mid = find_char_boundary(s, mid);
+
+        let prefix = &s[..safe_mid];
+        let w = console::measure_text_width(prefix);
+
+        if w <= max_width {
+            lo = safe_mid;
+        } else {
+            hi = find_char_boundary(s, safe_mid.saturating_sub(1));
+        }
+    }
+
+    // lo 是满足宽度 ≤ max_width 的最长前缀的字节位置
+    // 截取后添加 "…" 提示
+    let suffix = "…";
+    if lo == 0 {
+        Cow::Owned(suffix.to_string())
+    } else {
+        // 为后缀腾出空间
+        let suffix_w = console::measure_text_width(suffix);
+        let avail = max_width.saturating_sub(suffix_w);
+        let new_len = if avail == 0 {
+            lo
+        } else {
+            std::cmp::min(lo, avail)
+        };
+        let new_len = find_char_boundary(s, new_len);
+        if new_len == 0 {
+            Cow::Owned(suffix.to_string())
+        } else {
+            Cow::Owned(format!("{}{}", &s[..new_len], suffix))
+        }
+    }
+}
+
+/// 找到离 `pos` 最近的合法 UTF-8 字符边界（向左查找）
+fn find_char_boundary(s: &str, pos: usize) -> usize {
+    let mut p = pos.min(s.len());
+    while p > 0 && !s.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
 }

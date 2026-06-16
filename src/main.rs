@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
 
         // ---- 发送消息并流式输出 ----
         tracing::debug!("发送消息 (历史长度: {})", context.len());
-        let mut display = ui::StreamDisplay::new();
+        let mut display = ui::StreamDisplay::new(100);
 
         let final_res = stream_handler::process_stream(
             &prompt,
@@ -154,6 +154,12 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
 
         【当前工作目录】
         {}
+
+        【可用工具（仅限以下三种，没有其他工具）】
+        - ReadFile：读取指定路径的文件内容，返回带行号的内容
+        - WriteFile：覆盖写入指定路径的文件（⚠️ 会覆盖已有内容）
+        - RunCmd：执行完整的命令行语句，支持 Windows/Linux/macOS
+        重要提示：没有 Edit 工具。如需修改文件，请用 ReadFile 读取内容，在你的回答中修改，再用 WriteFile 完整覆盖写回。
 
         【注意事项】
         {}
