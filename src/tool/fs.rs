@@ -1,6 +1,8 @@
 /// 文件操作工具
 ///
 /// 提供安全的文件读写功能，所有写操作需要用户权限确认。
+use std::fmt::Write as _;
+
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -83,9 +85,10 @@ impl Tool for ReadFile {
         let mut result = numbered.join("\n");
 
         if total > max_lines {
-            result.push_str(&format!(
+            let _ = write!(
+                result,
                 "\n\n... (已截断，共 {total} 行，只显示前 {max_lines} 行)"
-            ));
+            );
         }
 
         Ok(result)
@@ -142,7 +145,7 @@ impl Tool for WriteFile {
         let content = &args.content;
 
         // 文件写入需要用户确认
-        crate::permission::confirm_file_write(path).await?;
+        crate::permission::confirm_file_write(path)?;
 
         // 确保父目录存在
         if let Some(parent) = std::path::Path::new(path).parent() {

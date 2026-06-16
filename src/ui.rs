@@ -1,4 +1,4 @@
-/// 终端 UI 工具模块
+﻿/// 终端 UI 工具模块
 ///
 /// 封装 console / dialoguer / indicatif，提供统一的美化终端输出。
 use std::io::{self, Write};
@@ -40,6 +40,7 @@ pub fn s_cmd(s: &str) -> String {
 /// - >= 1_000_000 → "1.23m"
 /// - >= 1_000     → "1.23k"
 /// - 否则保留原值
+#[allow(clippy::cast_precision_loss)]
 fn fmt_tokens(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.2}m", n as f64 / 1_000_000.0)
@@ -228,6 +229,7 @@ pub fn select_permission(action_desc: &str, detail: &str) -> Option<usize> {
 
 pub fn new_spinner(msg: &str) -> indicatif::ProgressBar {
     let pb = indicatif::ProgressBar::new_spinner();
+    #[allow(clippy::literal_string_with_formatting_args)]
     pb.set_style(
         indicatif::ProgressStyle::with_template("{spinner:.cyan} {msg}")
             .unwrap()
@@ -255,7 +257,7 @@ pub struct StreamDisplay {
     line_w: usize,
     /// 工具调用计数器（用于编号）
     tool_call_count: u32,
-    /// 累积每个 CompletionCall 的 token 用量
+    /// 累积每个 `CompletionCall` 的 token 用量
     completion_calls: Vec<(u32, Usage)>,
 }
 
@@ -292,7 +294,7 @@ impl StreamDisplay {
     fn finish_phase(&mut self) -> io::Result<()> {
         match self.state {
             StreamPhase::Answer | StreamPhase::ToolCallDelta | StreamPhase::ToolCall => {
-                writeln!(self.term)?
+                writeln!(self.term)?;
             }
             _ => {}
         }
@@ -383,21 +385,21 @@ impl StreamDisplay {
     /// 处理推理链完整块
     pub fn on_reasoning(&mut self, text: &str) -> io::Result<()> {
         self.enter_reasoning()?;
-        write!(self.term, "{}", text)?;
+        write!(self.term, "{text}")?;
         self.term.flush()
     }
 
     /// 处理推理链增量（流式 token）
     pub fn on_reasoning_delta(&mut self, text: &str) -> io::Result<()> {
         self.enter_reasoning()?;
-        write!(self.term, "{}", text)?;
+        write!(self.term, "{text}")?;
         self.term.flush()
     }
 
     /// 处理回答 token
     pub fn on_answer(&mut self, text: &str) -> io::Result<()> {
         self.enter_answer()?;
-        write!(self.term, "{}", text)?;
+        write!(self.term, "{text}")?;
         self.term.flush()
     }
 

@@ -2,7 +2,7 @@
 ///
 /// 提供在本地操作系统中安全执行命令的功能，
 /// 支持 Windows（PowerShell）和 Linux/macOS（sh）。
-/// 在 Windows 上使用 encoding_rs 智能处理 GBK/UTF-8 编码转换。
+/// 在 Windows 上使用 `encoding_rs` 智能处理 GBK/UTF-8 编码转换。
 use encoding_rs::GBK;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -56,20 +56,32 @@ impl Tool for RunCmd {
         let cmdline = args.command;
 
         // 权限检查
-        crate::permission::confirm_execution(&cmdline).await?;
+        crate::permission::confirm_execution(&cmdline)?;
 
         tracing::trace!("正在执行命令: '{cmdline}'");
 
+        // 【修复1】跨平台 & 跨版本 Shell 适配
         let output = if cfg!(target_os = "windows") {
-            std::process::Command::new("powershell")
+            // 优先使用 pwsh (PS 7+)，回退到 powershell (5.1)
+            let shell = if std::process::Command::new("pwsh")
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+            {
+                "pwsh"
+            } else {
+                "powershell"
+            };
+
+            std::process::Command::new(shell)
                 .args([
                     "-NoProfile",
                     "-NonInteractive",
                     "-Command",
-                    &format!(
-                        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {}",
-                        cmdline
-                    ),
+                    // PS7 和 5.1 均支持此语法设置 UTF-8
+                    &format!("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {cmdline}"),
                 ])
                 .output()
         } else {
@@ -79,33 +91,18 @@ impl Tool for RunCmd {
         }
         .map_err(AgentError::Io)?;
 
-        if output.status.success() {
-            let out = decode_output(&output.stdout);
-            let err = decode_output(&output.stderr);
+        let stdout = decode_output(&output.stdout);
+        let stderr = decode_output(&output.stderr);
 
-            if out.trim().is_empty() && !err.trim().is_empty() {
-                // 标准输出为空但有标准错误
-                tracing::warn!("命令成功但产生了 stderr 输出: {}", err.trim());
-                Ok(err.trim().to_string())
-            } else if out.trim().is_empty() {
-                Ok("命令已成功执行，无输出。".to_string())
-            } else {
-                Ok(out.trim().to_string())
-            }
+        // 【修复4】成功时合并 stdout + stderr，确保 LLM 能获取完整的编译警告与进度
+        let combined = format!("{}\n{}", stdout.trim(), stderr.trim())
+            .trim()
+            .to_string();
+
+        if combined.is_empty() {
+            Ok("命令已成功执行，无输出。".to_string())
         } else {
-            let stderr = decode_output(&output.stderr);
-            let stdout = decode_output(&output.stdout);
-            let msg = if stderr.trim().is_empty() {
-                stdout
-            } else {
-                stderr
-            };
-            Err(AgentError::Other(format!(
-                "命令 '{}' 执行失败 (状态码 {}): {}",
-                cmdline,
-                output.status,
-                msg.trim(),
-            )))
+            Ok(combined)
         }
     }
 }

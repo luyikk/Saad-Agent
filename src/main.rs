@@ -1,6 +1,6 @@
 //! Saad Agent — AI 编程助手
 //!
-//! 基于 DeepSeek 模型的智能命令行助手，可执行系统命令、
+//! 基于 `DeepSeek` 模型的智能命令行助手，可执行系统命令、
 //! 读写文件来帮助用户完成编程任务。
 
 use std::io::Write;
@@ -53,9 +53,8 @@ async fn main() -> Result<()> {
         print!("{} ", style("❯").cyan().bold());
         std::io::stdout().flush()?;
 
-        let prompt = match read_input(&mut reader).await {
-            Some(p) => p,
-            None => save_and_exit(&history),
+        let Some(prompt) = read_input(&mut reader).await else {
+            save_and_exit(&history)
         };
 
         if prompt.is_empty() {
@@ -64,7 +63,7 @@ async fn main() -> Result<()> {
 
         // 内置斜杠命令
         if prompt.starts_with('/') {
-            if let Some(true) = command::handle_command(&prompt, &mut history, max_history).await {
+            if command::handle_command(&prompt, &mut history, max_history) == Some(true) {
                 break;
             }
             continue;
@@ -118,32 +117,23 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
     let model_name = config::get_model_name();
     tracing::info!("使用模型: {}", model_name);
 
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "未知".to_string());
+    let cwd =
+        std::env::current_dir().map_or_else(|_| "未知".to_string(), |p| p.display().to_string());
 
-    let mut notes = vec![
+    let notes = [
         "- 所有相对路径都基于上述工作目录".to_string(),
         "- 在执行命令或读写文件时，优先使用绝对路径".to_string(),
         "- 如果不确定某个文件的位置，先用 Get-ChildItem / ls 探索目录结构".to_string(),
     ];
 
-    // Windows + 非 PowerShell 7 → 禁止 && 语法
-    if cfg!(target_os = "windows") && !ps_supports_and_and() {
-        notes.push(
-            "- 当前环境为 Windows PowerShell 5.1，绝对禁止使用 '&&' 或 '||' 连接命令！请用 ';' 分隔或分次执行。"
-                .to_string(),
-        );
-    }
-
     let preamble = format!(
-        r#"你是一个专业的程序员助手，可以执行命令和读写文件来帮助用户完成任务。
+        r"你是一个专业的程序员助手，可以执行命令和读写文件来帮助用户完成任务。
 
 【当前工作目录】
 {}
 
 【注意事项】
-{}"#,
+{}",
         cwd,
         notes.join("\n"),
     );
@@ -161,22 +151,6 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
         .build()
 }
 
-/// 检测当前 PowerShell 是否支持 `&&` 连接语法（PS 7+ 才支持）
-fn ps_supports_and_and() -> bool {
-    std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$PSVersionTable.PSVersion.Major -ge 7",
-        ])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim() == "True")
-        .unwrap_or(false)
-}
-
 /// 读取一行用户输入，返回 `None` 表示 EOF/Ctrl+C
 async fn read_input(reader: &mut tokio::io::BufReader<tokio::io::Stdin>) -> Option<String> {
     let mut prompt = String::new();
@@ -187,15 +161,11 @@ async fn read_input(reader: &mut tokio::io::BufReader<tokio::io::Stdin>) -> Opti
     };
 
     match read_result {
-        None => {
-            println!();
-            None
-        }
         Some(Err(e)) => {
-            ui::print_error(&format!("读取输入失败: {}", e));
+            ui::print_error(&format!("读取输入失败: {e}"));
             None
         }
-        Some(Ok(0)) => {
+        None | Some(Ok(0)) => {
             println!();
             None
         }

@@ -11,7 +11,7 @@ pub const DEFAULT_MAX_TURNS: usize = 100;
 pub const DEFAULT_TEMPERATURE: f64 = 0.5;
 
 /// 最大 Token 数
-pub const DEFAULT_MAX_TOKENS: usize = 384000;
+pub const DEFAULT_MAX_TOKENS: usize = 384_000;
 
 /// 对话历史保留的最大消息数（防止 token 超限）
 pub const MAX_HISTORY_MESSAGES: usize = 40;
@@ -32,7 +32,7 @@ pub fn get_model_name() -> String {
     std::env::var("DEEPSEEK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
 }
 
-/// 获取最大 Token 数（优先从环境变量 SAAD_MAX_TOKENS 读取）
+/// 获取最大 Token 数（优先从环境变量 `SAAD_MAX_TOKENS` 读取）
 pub fn get_max_tokens() -> usize {
     std::env::var("SAAD_MAX_TOKENS")
         .ok()
@@ -40,7 +40,7 @@ pub fn get_max_tokens() -> usize {
         .unwrap_or(DEFAULT_MAX_TOKENS)
 }
 
-/// 获取最大历史消息数（优先从环境变量 SAAD_MAX_HISTORY 读取）
+/// 获取最大历史消息数（优先从环境变量 `SAAD_MAX_HISTORY` 读取）
 pub fn get_max_history_messages() -> usize {
     std::env::var("SAAD_MAX_HISTORY")
         .ok()

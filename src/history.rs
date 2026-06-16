@@ -24,7 +24,7 @@ pub struct SavedMessage {
 // 消息文本提取
 // ============================================================
 
-/// 从 Message 中提取纯文本内容（含 ToolCall 标记）
+/// 从 Message 中提取纯文本内容（含 `ToolCall` 标记）
 pub fn message_text(msg: &Message) -> String {
     match msg {
         Message::System { content } => content.clone(),
@@ -42,7 +42,7 @@ pub fn message_text(msg: &Message) -> String {
                 AssistantContent::Text(t) => Some(t.text.clone()),
                 AssistantContent::Reasoning(r) => Some(r.display_text()),
                 AssistantContent::ToolCall(tc) => Some(format!("[ToolCall: {}]", tc.function.name)),
-                _ => None,
+                AssistantContent::Image(_) => None,
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -65,7 +65,7 @@ pub fn message_preview(msg: &Message, max_chars: usize) -> String {
 }
 
 /// 获取消息的角色名称
-pub fn message_role_name(msg: &Message) -> &'static str {
+pub const fn message_role_name(msg: &Message) -> &'static str {
     match msg {
         Message::System { .. } => "system",
         Message::User { .. } => "user",
@@ -84,7 +84,7 @@ impl SavedMessage {
             Message::User { .. } => ("user".to_string(), message_text(msg)),
             Message::Assistant { .. } => ("assistant".to_string(), message_text(msg)),
         };
-        SavedMessage { role, content }
+        Self { role, content }
     }
 
     pub fn to_rig(&self) -> Message {

@@ -72,7 +72,7 @@ fn handle_selection(selection: usize, action_desc: &str) -> Result<(), String> {
 /// 根据当前权限级别决定是否需要交互：
 /// - `PERM_SESSION_ALLOW_ALL` / `PERM_PERMANENT_ALLOW_ALL` → 自动允许
 /// - `PERM_PROMPT` → 显示 `dialoguer::Select` 交互界面
-pub async fn confirm_execution(cmdline: &str) -> Result<(), AgentError> {
+pub fn confirm_execution(cmdline: &str) -> Result<(), AgentError> {
     let level = PERMISSION_LEVEL.load(Ordering::Relaxed);
     match level {
         PERM_SESSION_ALLOW_ALL | PERM_PERMANENT_ALLOW_ALL => return Ok(()),
@@ -80,26 +80,26 @@ pub async fn confirm_execution(cmdline: &str) -> Result<(), AgentError> {
     }
 
     // 使用 dialoguer 交互选择
-    match crate::ui::select_permission("即将执行命令:", cmdline) {
-        Some(selection) => {
+    crate::ui::select_permission("即将执行命令:", cmdline).map_or_else(
+        || Err(AgentError::Other("权限选择已取消".to_string())),
+        |selection| {
             handle_selection(selection, &format!("命令执行: {cmdline}")).map_err(AgentError::Other)
-        }
-        None => Err(AgentError::Other("权限选择已取消".to_string())),
-    }
+        },
+    )
 }
 
 /// 询问用户是否允许写入文件
-pub async fn confirm_file_write(path: &str) -> Result<(), AgentError> {
+pub fn confirm_file_write(path: &str) -> Result<(), AgentError> {
     let level = PERMISSION_LEVEL.load(Ordering::Relaxed);
     match level {
         PERM_SESSION_ALLOW_ALL | PERM_PERMANENT_ALLOW_ALL => return Ok(()),
         _ => {}
     }
 
-    match crate::ui::select_permission("即将写入文件:", path) {
-        Some(selection) => {
+    crate::ui::select_permission("即将写入文件:", path).map_or_else(
+        || Err(AgentError::Other("权限选择已取消".to_string())),
+        |selection| {
             handle_selection(selection, &format!("文件写入: {path}")).map_err(AgentError::Other)
-        }
-        None => Err(AgentError::Other("权限选择已取消".to_string())),
-    }
+        },
+    )
 }

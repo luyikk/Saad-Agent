@@ -14,11 +14,7 @@ use crate::ui;
 /// 返回值：
 /// - `Some(true)` — 应退出程序
 /// - `None`        — 继续运行
-pub async fn handle_command(
-    cmd: &str,
-    history: &mut Vec<Message>,
-    max_history: usize,
-) -> Option<bool> {
+pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize) -> Option<bool> {
     match cmd.to_lowercase().as_str() {
         "/exit" | "/quit" => {
             if !history.is_empty() {
@@ -43,9 +39,9 @@ pub async fn handle_command(
             } else {
                 match history::save_history(history) {
                     Ok(()) => {
-                        ui::print_success(&format!("对话历史已保存 ({} 条消息)", history.len()))
+                        ui::print_success(&format!("对话历史已保存 ({} 条消息)", history.len()));
                     }
-                    Err(e) => ui::print_error(&format!("保存失败: {}", e)),
+                    Err(e) => ui::print_error(&format!("保存失败: {e}")),
                 }
             }
             None
@@ -58,10 +54,10 @@ pub async fn handle_command(
                     } else {
                         let count = loaded.len();
                         *history = loaded;
-                        ui::print_success(&format!("已加载 {} 条历史消息", count));
+                        ui::print_success(&format!("已加载 {count} 条历史消息"));
                     }
                 }
-                Err(e) => ui::print_error(&format!("加载失败: {}", e)),
+                Err(e) => ui::print_error(&format!("加载失败: {e}")),
             }
             None
         }

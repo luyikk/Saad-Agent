@@ -13,7 +13,7 @@ use crate::ui::StreamDisplay;
 /// 处理一条 AI 流式响应，驱动 `display` 渲染，返回最终的 `FinalResponse`。
 ///
 /// # 类型参数
-/// - `R` — CompletionModel 的 Response 类型（由 `stream_chat` 自动推导）
+/// - `R` — `CompletionModel` 的 Response 类型（由 `stream_chat` 自动推导）
 /// - `E` — 流错误类型（由 `stream_chat` 自动推导，实现了 `Display`）
 pub async fn process_stream<R, E>(
     _prompt: &str,
@@ -68,7 +68,7 @@ where
                 use rig::streaming::ToolCallDeltaContent;
                 match content {
                     ToolCallDeltaContent::Name(name) => {
-                        let _ = display.on_tool_call_delta(&format!("[调用: {}]", name));
+                        let _ = display.on_tool_call_delta(&format!("[调用: {name}]"));
                     }
                     ToolCallDeltaContent::Delta(delta) => {
                         let _ = display.on_tool_call_delta(&delta);
@@ -85,7 +85,7 @@ where
                     .iter()
                     .filter_map(|c| match c {
                         ToolResultContent::Text(t) => Some(t.text.clone()),
-                        _ => None,
+                        ToolResultContent::Image(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -99,6 +99,7 @@ where
             Ok(MultiTurnStreamItem::CompletionCall(CompletionCall {
                 call_index, usage, ..
             })) => {
+                #[allow(clippy::cast_possible_truncation)]
                 display.on_completion_call(call_index as u32, usage);
             }
 
