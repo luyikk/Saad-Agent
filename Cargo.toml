@@ -1,16 +1,18 @@
 ﻿[package]
 name = "Saad-Agent"
-version = "0.1.0"
-edition = "2024"
+version = "0.2.0"
+edition = "2021"
+description = "AI 编程助手 - 基于 DeepSeek 的智能 Agent"
 
 [dependencies]
-tokio = {version = "1",features = ["full"]}
-rig = {version = "0.38.2",features = ["default","derive","image","discord-bot"]}
+tokio = { version = "1", features = ["full"] }
+rig = { version = "0.38.2", features = ["default", "derive", "image", "discord-bot"] }
 anyhow = "1"
-serde_json = "1.0.149"
-serde = { version = "1.0.228", features = ["derive"] }
-tracing-subscriber = { version = "0.3.23", features = ["env-filter","fmt"] }
-tracing = "0.1.44"
-schemars="1"
-thiserror = "2.0.18"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing = "0.1"
+schemars = "1"
+thiserror = "2"
 encoding_rs = "0.8"
+dotenvy = "0.15"
