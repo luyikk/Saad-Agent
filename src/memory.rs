@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use rig::completion::{AssistantContent, CompletionModel};
-use rig::message::{Message, UserContent};
+use rig::message::{Message, ToolResultContent, UserContent};
 
 use crate::config;
 
@@ -22,6 +22,9 @@ pub struct ConversationMemory {
     max_messages: usize,
     summary: Option<String>,
 }
+
+/// 单条工具结果/消息文本的最大字符数（超过则截断以节省 token）
+const MAX_MESSAGE_CHARS: usize = 4000;
 
 impl ConversationMemory {
     /// 创建新的记忆体
@@ -77,8 +80,31 @@ impl ConversationMemory {
         self.summary = None;
     }
 
+    /// 扩展消息历史，自动过滤无用的历史记录：
+    ///
+    /// 1. **空消息** — 丢弃没有任何文本内容的消息
+    /// 2. **连续重复** — 丢弃与上一条完全相同的消息（常见于重试/循环）
+    /// 3. **过长截断** — 单条消息超过 `MAX_MESSAGE_CHARS` 字符时自动截断
     pub fn extend(&mut self, new_messages: &[Message]) {
-        self.messages.extend_from_slice(new_messages);
+        for msg in new_messages {
+            // ① 跳过空消息
+            if is_message_empty(msg) {
+                tracing::debug!("跳过空消息: role={}", message_role_name(msg));
+                continue;
+            }
+
+            // ② 克隆后截断过长文本
+            let mut filtered = msg.clone();
+            truncate_message_texts(&mut filtered);
+
+            // ③ 去重：跳过与上一条完全相同的消息
+            if self.messages.last() == Some(&filtered) {
+                tracing::debug!("跳过重复消息: role={}", message_role_name(msg));
+                continue;
+            }
+
+            self.messages.push(filtered);
+        }
     }
 
     #[allow(dead_code)]
@@ -197,6 +223,72 @@ impl ConversationMemory {
 }
 
 // ============================================================
+// extend 辅助: 消息过滤与截断
+// ============================================================
+
+/// 判断消息是否完全没有文本内容（应被丢弃）
+fn is_message_empty(msg: &Message) -> bool {
+    match msg {
+        Message::System { content } => content.trim().is_empty(),
+        Message::User { content } => content.iter().all(|c| match c {
+            UserContent::Text(t) => t.text.trim().is_empty(),
+            UserContent::ToolResult(tr) => tr.content.iter().all(|tc| match tc {
+                ToolResultContent::Text(t) => t.text.trim().is_empty(),
+                ToolResultContent::Image(_) => false,
+            }),
+            // Image / Audio / Video / Document 视为有内容
+            _ => false,
+        }),
+        Message::Assistant { content, .. } => content.iter().all(|c| match c {
+            AssistantContent::Text(t) => t.text.trim().is_empty(),
+            // ToolCall / Reasoning / Image 视为有内容
+            _ => false,
+        }),
+    }
+}
+
+/// 就地截断消息中超过 `MAX_MESSAGE_CHARS` 的文本字段
+fn truncate_message_texts(msg: &mut Message) {
+    match msg {
+        Message::System { content } => {
+            truncate_str(content, "系统消息");
+        }
+        Message::User { content } => {
+            for c in content.iter_mut() {
+                match c {
+                    UserContent::Text(t) => {
+                        truncate_str(&mut t.text, "文本");
+                    }
+                    UserContent::ToolResult(tr) => {
+                        for tc in tr.content.iter_mut() {
+                            if let ToolResultContent::Text(t) = tc {
+                                truncate_str(&mut t.text, "工具结果");
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Message::Assistant { content, .. } => {
+            for c in content.iter_mut() {
+                if let AssistantContent::Text(t) = c {
+                    truncate_str(&mut t.text, "助手回复");
+                }
+            }
+        }
+    }
+}
+
+/// 如果字符串超过 `MAX_MESSAGE_CHARS` 则截断并附加提示
+fn truncate_str(s: &mut String, label: &str) {
+    if s.chars().count() > MAX_MESSAGE_CHARS {
+        let truncated: String = s.chars().take(MAX_MESSAGE_CHARS).collect();
+        *s = format!("{truncated}\n\n[{label}过长，已截断，保留前 {MAX_MESSAGE_CHARS} 字符]");
+    }
+}
+
+// ============================================================
 // 摘要辅助
 // ============================================================
 
@@ -300,7 +392,7 @@ pub const fn message_role_name(msg: &Message) -> &'static str {
 // ============================================================
 
 /// 保存对话历史到 JSON 文件
-fn save_history(messages: &[Message], summary: Option<&str>) -> Result<()> {
+pub fn save_history(messages: &[Message], summary: Option<&str>) -> Result<()> {
     let path = config::history_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
