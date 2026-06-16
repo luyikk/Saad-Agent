@@ -17,7 +17,7 @@ use tracing_subscriber::prelude::*;
 mod command;
 mod config;
 mod error;
-mod history;
+mod memory;
 mod permission;
 mod stream_handler;
 mod tool;
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     let agent = build_agent(&client);
 
     // ---- 加载对话历史 ----
-    let mut history = history::load_history().unwrap_or_else(|e| {
+    let mut history = memory::load_history().unwrap_or_else(|e| {
         tracing::warn!("加载对话历史失败: {}，将使用全新对话", e);
         vec![]
     });
@@ -78,13 +78,13 @@ async fn main() -> Result<()> {
             agent.stream_chat(&prompt, &history).await,
             &mut display,
         )
-        .await;
+        .await?;
 
         // 更新对话历史
         if let Some(new_history) = final_res.history() {
             history.extend_from_slice(new_history);
         }
-        history::trim_history(&mut history, max_history);
+        memory::trim_history(&mut history, max_history);
     }
 
     std::process::exit(0);
@@ -134,16 +134,28 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
         );
     }
 
+    let effort = config::get_effort_level();
+
     let preamble = format!(
         r"你是一个专业的程序员助手，可以执行命令和读写文件来帮助用户完成任务。
 
-【当前工作目录】
-{}
+        【当前工作目录】
+        {}
 
-【注意事项】
-{}",
+        【注意事项】
+        {}
+
+        【回答风格】
+        {}",
         cwd,
         notes.join("\n"),
+        effort.preamble_instruction(),
+    );
+
+    tracing::info!(
+        "Effort level: {:?}, max_tokens: {}",
+        effort,
+        effort.max_tokens()
     );
 
     client
@@ -152,7 +164,7 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
         .name("Saad")
         .default_max_turns(config::DEFAULT_MAX_TURNS)
         .temperature(config::DEFAULT_TEMPERATURE)
-        .max_tokens(config::get_max_tokens() as u64)
+        .max_tokens(effort.max_tokens() as u64)
         .tool(tool::cmd::RunCmd)
         .tool(tool::fs::ReadFile)
         .tool(tool::fs::WriteFile)
@@ -199,7 +211,7 @@ async fn read_input(reader: &mut tokio::io::BufReader<tokio::io::Stdin>) -> Opti
 /// 保存历史并优雅退出
 fn save_and_exit(history: &[rig::message::Message]) -> ! {
     if !history.is_empty() {
-        if let Err(e) = history::save_history(history) {
+        if let Err(e) = memory::save_history(history) {
             tracing::warn!("保存对话历史失败: {}", e);
         }
     }

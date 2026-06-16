@@ -6,7 +6,7 @@ use console::style;
 use rig::message::Message;
 
 use crate::config;
-use crate::history;
+use crate::memory;
 use crate::ui;
 
 /// 处理内置斜杠命令。
@@ -18,7 +18,7 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
     match cmd.to_lowercase().as_str() {
         "/exit" | "/quit" => {
             if !history.is_empty() {
-                let _ = history::save_history(history);
+                let _ = memory::save_history(history);
             }
             ui::print_goodbye(!history.is_empty());
             Some(true) // 退出
@@ -37,7 +37,7 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
             if history.is_empty() {
                 ui::print_warning("对话历史为空，无需保存");
             } else {
-                match history::save_history(history) {
+                match memory::save_history(history) {
                     Ok(()) => {
                         ui::print_success(&format!("对话历史已保存 ({} 条消息)", history.len()));
                     }
@@ -47,7 +47,7 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
             None
         }
         "/load" => {
-            match history::load_history() {
+            match memory::load_history() {
                 Ok(loaded) => {
                     if loaded.is_empty() {
                         ui::print_warning("没有找到保存的对话历史");
@@ -78,14 +78,14 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
                 };
                 ui::print_divider();
                 for (i, msg) in history.iter().enumerate().skip(start) {
-                    let role = history::message_role_name(msg);
+                    let role = memory::message_role_name(msg);
                     let role_styled = match role {
                         "user" => style("user").cyan(),
                         "assistant" => style("assistant").green(),
                         "system" => style("system").dim(),
                         _ => style(role),
                     };
-                    let preview = history::message_preview(msg, 70);
+                    let preview = memory::message_preview(msg, 70);
                     println!(
                         "  [{}] {} {}",
                         style(i).dim(),

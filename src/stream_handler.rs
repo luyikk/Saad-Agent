@@ -19,7 +19,7 @@ pub async fn process_stream<R, E>(
     _prompt: &str,
     stream: impl futures_util::stream::Stream<Item = Result<MultiTurnStreamItem<R>, E>>,
     display: &mut StreamDisplay,
-) -> FinalResponse
+) -> anyhow::Result<FinalResponse>
 where
     E: std::fmt::Display,
 {
@@ -35,21 +35,21 @@ where
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                 Text { text, .. },
             ))) => {
-                let _ = display.on_answer(&text);
+                display.on_answer(&text)?;
             }
 
             // ── 推理链增量（流式） ──
             Ok(MultiTurnStreamItem::StreamAssistantItem(
                 StreamedAssistantContent::ReasoningDelta { reasoning, .. },
             )) => {
-                let _ = display.on_reasoning_delta(&reasoning);
+                display.on_reasoning_delta(&reasoning)?;
             }
 
             // ── 推理链完整块 ──
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
                 reasoning,
             ))) => {
-                let _ = display.on_reasoning(&reasoning.display_text());
+                display.on_reasoning(&reasoning.display_text())?;
             }
 
             // ── 工具调用 ──
@@ -58,7 +58,7 @@ where
                 ..
             })) => {
                 let args_preview = serde_json::to_string(&function.arguments).unwrap_or_default();
-                let _ = display.on_tool_call(&function.name, &args_preview);
+                display.on_tool_call(&function.name, &args_preview)?;
             }
 
             // ── 工具调用参数增量 ──
@@ -68,10 +68,10 @@ where
                 use rig::streaming::ToolCallDeltaContent;
                 match content {
                     ToolCallDeltaContent::Name(name) => {
-                        let _ = display.on_tool_call_delta(&format!("[调用: {name}]"));
+                        display.on_tool_call_delta(&format!("[调用: {name}]"))?;
                     }
                     ToolCallDeltaContent::Delta(delta) => {
-                        let _ = display.on_tool_call_delta(&delta);
+                        display.on_tool_call_delta(&delta)?;
                     }
                 }
             }
@@ -90,7 +90,7 @@ where
                     .collect::<Vec<_>>()
                     .join("\n");
                 let preview = crate::ui::truncate_str(&summary, 200);
-                let _ = display.on_tool_result(true, &preview);
+                display.on_tool_result(true, &preview)?;
             }
 
             // ── Provider Completion 调用详情 ──
@@ -117,5 +117,5 @@ where
     }
 
     display.finalize(&final_res.usage());
-    final_res
+    Ok(final_res)
 }

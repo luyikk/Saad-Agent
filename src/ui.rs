@@ -1,4 +1,4 @@
-﻿/// 终端 UI 工具模块
+/// 终端 UI 工具模块
 ///
 /// 封装 console / dialoguer / indicatif，提供统一的美化终端输出。
 use std::io::{self, Write};
@@ -290,10 +290,11 @@ impl StreamDisplay {
 
     // ── 内部：阶段切换 ──
 
-    /// 阶段切换前的收尾
-    fn finish_phase(&mut self) -> io::Result<()> {
+    /// 结束当前行（如果正在行内输出文本），保证光标在新行开头
+    fn end_line(&mut self) -> io::Result<()> {
         match self.state {
-            StreamPhase::Answer | StreamPhase::ToolCallDelta | StreamPhase::ToolCall => {
+            StreamPhase::Answer | StreamPhase::Reasoning | StreamPhase::ToolCallDelta => {
+                // 之前正在流式输出文本，光标在行内，需要换行收尾
                 writeln!(self.term)?;
             }
             _ => {}
@@ -301,33 +302,28 @@ impl StreamDisplay {
         Ok(())
     }
 
-    /// 打印推理链阶段的区块头部
-    fn enter_reasoning(&mut self) -> io::Result<()> {
-        if self.state == StreamPhase::Reasoning {
+    /// 进入新阶段：收尾上一阶段 + 打印阶段头部
+    fn enter_phase(&mut self, icon: &str, label: &str, target: StreamPhase) -> io::Result<()> {
+        if self.state == target {
             return Ok(());
         }
-        self.finish_phase()?;
-        writeln!(self.term)?;
-        self.phase_header("🧠", "深度思考")?;
-        self.state = StreamPhase::Reasoning;
-        Ok(())
-    }
-
-    /// 打印回答阶段的区块头部
-    fn enter_answer(&mut self) -> io::Result<()> {
-        if self.state == StreamPhase::Answer {
-            return Ok(());
+        self.end_line()?;
+        // 只在从 Idle 进入时才不加空行，否则用一个空行分隔
+        if self.state != StreamPhase::Idle {
+            writeln!(self.term)?;
         }
-        self.finish_phase()?;
-        writeln!(self.term)?;
-        self.phase_header("💬", "回答")?;
-        self.state = StreamPhase::Answer;
+        self.print_phase_header(icon, label)?;
+        self.state = target;
         Ok(())
     }
 
     /// 打印阶段头部：`🧠 深度思考 ──────────────────────`
-    fn phase_header(&mut self, icon: &str, label: &str) -> io::Result<()> {
-        let fill = self.line_w.saturating_sub(label.len() + 4); // icon + 空格 + label + 空格
+    fn print_phase_header(&mut self, icon: &str, label: &str) -> io::Result<()> {
+        let icon_w = console::measure_text_width(icon);
+        let label_w = console::measure_text_width(label);
+        // 布局: icon + 空格 + label + 空格 + 填充线
+        let used = icon_w + 1 + label_w + 1;
+        let fill = self.line_w.saturating_sub(used);
         writeln!(
             self.term,
             "{} {} {}",
@@ -339,7 +335,7 @@ impl StreamDisplay {
 
     /// 打印工具调用信息行
     fn print_tool_call(&mut self, name: &str, args_preview: &str) -> io::Result<()> {
-        self.finish_phase()?;
+        self.end_line()?;
         self.tool_call_count += 1;
         writeln!(
             self.term,
@@ -349,11 +345,12 @@ impl StreamDisplay {
             style(name).cyan().bold()
         )?;
         if !args_preview.is_empty() {
+            let avail = self.line_w.saturating_sub(4); // "  " + "└ " = 4 列
             writeln!(
                 self.term,
                 "  {} {}",
                 s_dim("└"),
-                s_dim(&truncate_str(args_preview, self.line_w.saturating_sub(6)))
+                s_dim(&truncate_str(args_preview, avail))
             )?;
         }
         self.state = StreamPhase::ToolCall;
@@ -362,19 +359,20 @@ impl StreamDisplay {
 
     /// 打印工具返回结果
     fn print_tool_result(&mut self, success: bool, summary: &str) -> io::Result<()> {
+        let avail = self.line_w.saturating_sub(4); // "  " + icon + " " = 4 列
         if success {
             writeln!(
                 self.term,
                 "  {} {}",
                 s_success("✓"),
-                s_dim(&truncate_str(summary, self.line_w.saturating_sub(6)))
+                s_dim(&truncate_str(summary, avail))
             )?;
         } else {
             writeln!(
                 self.term,
                 "  {} {}",
                 s_error("✗"),
-                s_error(&truncate_str(summary, self.line_w.saturating_sub(6)))
+                s_error(&truncate_str(summary, avail))
             )?;
         }
         Ok(())
@@ -384,21 +382,21 @@ impl StreamDisplay {
 
     /// 处理推理链完整块
     pub fn on_reasoning(&mut self, text: &str) -> io::Result<()> {
-        self.enter_reasoning()?;
+        self.enter_phase("🧠", "深度思考", StreamPhase::Reasoning)?;
         write!(self.term, "{text}")?;
         self.term.flush()
     }
 
     /// 处理推理链增量（流式 token）
     pub fn on_reasoning_delta(&mut self, text: &str) -> io::Result<()> {
-        self.enter_reasoning()?;
+        self.enter_phase("🧠", "深度思考", StreamPhase::Reasoning)?;
         write!(self.term, "{text}")?;
         self.term.flush()
     }
 
     /// 处理回答 token
     pub fn on_answer(&mut self, text: &str) -> io::Result<()> {
-        self.enter_answer()?;
+        self.enter_phase("💬", "回答", StreamPhase::Answer)?;
         write!(self.term, "{text}")?;
         self.term.flush()
     }
@@ -411,7 +409,7 @@ impl StreamDisplay {
     /// 处理工具调用的增量参数流
     pub fn on_tool_call_delta(&mut self, delta: &str) -> io::Result<()> {
         if self.state != StreamPhase::ToolCallDelta {
-            self.finish_phase()?;
+            self.end_line()?;
             self.state = StreamPhase::ToolCallDelta;
         }
         write!(self.term, "{}", s_dim(delta))?;
@@ -483,7 +481,7 @@ pub fn truncate_str(s: &str, max_chars: usize) -> String {
             "{}...",
             chars
                 .into_iter()
-                .take(max_chars.saturating_sub(3))
+                .take(max_chars.saturating_sub(10))
                 .collect::<String>()
         )
     } else {
