@@ -9,11 +9,11 @@ use rig::message::{Message, UserContent};
 
 use crate::config;
 
-
-
-// ============================================================
-// 消息文本提取
-// ============================================================
+pub struct ConversationMemory {
+    messages: Vec<Message>,
+    max_messages: usize,
+    summary: Option<String>,
+}
 
 /// 从 Message 中提取纯文本内容（含 `ToolCall` 标记）
 pub fn message_text(msg: &Message) -> String {
@@ -75,7 +75,11 @@ pub fn save_history(history: &[Message]) -> Result<()> {
     }
     let json = serde_json::to_string_pretty(history)?;
     std::fs::write(&path, json)?;
-    tracing::debug!("对话历史已保存到: {} ({} 条消息)", path.display(), history.len());
+    tracing::debug!(
+        "对话历史已保存到: {} ({} 条消息)",
+        path.display(),
+        history.len()
+    );
     Ok(())
 }
 

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 /// 终端 UI 工具模块
 ///
 /// 封装 console / dialoguer / indicatif，提供统一的美化终端输出。
@@ -144,6 +145,10 @@ pub fn print_help() {
 
     let commands: &[(&str, &str)] = &[
         ("/help", "显示此帮助信息"),
+        (
+            "/effort <level>",
+            "设置回答详细程度 (concise/normal/elaborate)",
+        ),
         ("/clear", "清空对话历史"),
         ("/save", "保存对话历史到磁盘"),
         ("/load", "从磁盘加载对话历史"),
@@ -357,24 +362,43 @@ impl StreamDisplay {
         Ok(())
     }
 
-    /// 打印工具返回结果
+    /// 打印工具返回结果（支持多行输出）
+    ///
+    /// 对多行内容：`✓` 单独一行，后续内容逐行带缩进渲染，
+    /// 最多显示 10 行，超出部分显示截断提示。
     fn print_tool_result(&mut self, success: bool, summary: &str) -> io::Result<()> {
-        let avail = self.line_w.saturating_sub(4); // "  " + icon + " " = 4 列
-        if success {
-            writeln!(
-                self.term,
-                "  {} {}",
-                s_success("✓"),
-                s_dim(&truncate_str(summary, avail))
-            )?;
+        let icon = if success {
+            s_success("✓")
         } else {
+            s_error("✗")
+        };
+        writeln!(self.term, "         {icon}")?;
+
+        // 多行内容逐行渲染，统一缩进
+        const MAX_LINES: usize = 10;
+        let lines: Vec<&str> = summary.lines().collect();
+        let total = lines.len();
+        let display_lines = if total > MAX_LINES {
+            &lines[..MAX_LINES]
+        } else {
+            &lines
+        };
+
+        for line in display_lines {
+            let trimmed = truncate_str(line, self.line_w.saturating_sub(6));
+            writeln!(self.term, "    {}", s_dim(&trimmed))?;
+        }
+
+        if total > MAX_LINES {
             writeln!(
                 self.term,
-                "  {} {}",
-                s_error("✗"),
-                s_error(&truncate_str(summary, avail))
+                "    {}",
+                s_dim(&format!("... (还有 {} 行已省略)", total - MAX_LINES))
             )?;
+        } else if total > 1 {
+            writeln!(self.term, "    {}", s_dim(&format!("({total} 行)",)))?;
         }
+
         Ok(())
     }
 
@@ -448,7 +472,7 @@ impl StreamDisplay {
     /// 处理流错误
     pub fn on_error(&mut self, err: &str) {
         let _ = writeln!(self.term);
-        let _ = writeln!(self.term, "{} {}", s_error("✗"), s_error(err));
+        let _ = writeln!(self.term, "   {} {}", s_error("✗"), s_error(err));
     }
 
     /// 打印最终统计信息并收尾
@@ -474,9 +498,9 @@ impl StreamDisplay {
 }
 
 /// 截断字符串到指定宽度（按字符数，非字节）
-pub fn truncate_str(s: &str, max_chars: usize) -> String {
+pub fn truncate_str(s: &str, max_chars: usize) -> Cow<'_, str> {
     let chars: Vec<char> = s.chars().collect();
-    if chars.len() > max_chars {
+    if max_chars != 0 && chars.len() > max_chars {
         format!(
             "{}...",
             chars
@@ -484,7 +508,8 @@ pub fn truncate_str(s: &str, max_chars: usize) -> String {
                 .take(max_chars.saturating_sub(10))
                 .collect::<String>()
         )
+        .into()
     } else {
-        s.to_string()
+        s.into()
     }
 }

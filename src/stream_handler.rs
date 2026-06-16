@@ -89,8 +89,7 @@ where
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                let preview = crate::ui::truncate_str(&summary, 200);
-                display.on_tool_result(true, &preview)?;
+                display.on_tool_result(true, &summary)?;
             }
 
             // ── Provider Completion 调用详情 ──

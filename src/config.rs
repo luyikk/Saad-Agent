@@ -1,5 +1,6 @@
 /// 应用程序配置
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// 默认的 AI 模型名称
 pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
@@ -76,20 +77,60 @@ impl EffortLevel {
             Self::Elaborate => get_max_tokens(),
         }
     }
+
+    /// 从字符串解析 EffortLevel
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "concise" | "low" => Some(Self::Concise),
+            "normal" | "medium" | "default" => Some(Self::Normal),
+            "elaborate" | "high" | "detailed" => Some(Self::Elaborate),
+            _ => None,
+        }
+    }
+
+    /// 显示名称
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Concise => "简洁 (concise)",
+            Self::Normal => "正常 (normal)",
+            Self::Elaborate => "详细 (elaborate)",
+        }
+    }
 }
 
-/// 获取努力程度级别（优先从环境变量 `SAAD_EFFORT` 读取）
-///
-/// 有效值: `concise`, `normal`, `elaborate`
+// ── 动态 effort level ──
+
+/// 0 = 未设置（使用环境变量）, 1 = Concise, 2 = Normal, 3 = Elaborate
+static DYNAMIC_EFFORT: AtomicU8 = AtomicU8::new(0);
+
+/// 通过 `/effort` 命令动态设置努力程度（运行时覆盖）
+pub fn set_dynamic_effort(level: EffortLevel) {
+    let val = match level {
+        EffortLevel::Concise => 1,
+        EffortLevel::Normal => 2,
+        EffortLevel::Elaborate => 3,
+    };
+    DYNAMIC_EFFORT.store(val, Ordering::SeqCst);
+}
+
+/// 获取当前努力程度（动态设置优先，否则回退到环境变量）
 pub fn get_effort_level() -> EffortLevel {
-    match std::env::var("SAAD_EFFORT")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
-        "concise" | "low" => EffortLevel::Concise,
-        "elaborate" | "high" | "detailed" => EffortLevel::Elaborate,
-        _ => EffortLevel::Normal,
+    match DYNAMIC_EFFORT.load(Ordering::SeqCst) {
+        1 => EffortLevel::Concise,
+        2 => EffortLevel::Normal,
+        3 => EffortLevel::Elaborate,
+        _ => {
+            // 0 = 未动态设置，使用环境变量
+            match std::env::var("SAAD_EFFORT")
+                .unwrap_or_default()
+                .to_lowercase()
+                .as_str()
+            {
+                "concise" | "low" => EffortLevel::Concise,
+                "elaborate" | "high" | "detailed" => EffortLevel::Elaborate,
+                _ => EffortLevel::Normal,
+            }
+        }
     }
 }
 

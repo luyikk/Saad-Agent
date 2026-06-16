@@ -9,29 +9,45 @@ use crate::config;
 use crate::memory;
 use crate::ui;
 
+/// 命令处理结果
+pub enum CommandResult {
+    /// 继续运行
+    Continue,
+    /// 退出程序
+    Exit,
+    /// 需要重建 Agent（effort level 改变）
+    RebuildAgent,
+}
+
 /// 处理内置斜杠命令。
-///
-/// 返回值：
-/// - `Some(true)` — 应退出程序
-/// - `None`        — 继续运行
-pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize) -> Option<bool> {
-    match cmd.to_lowercase().as_str() {
-        "/exit" | "/quit" => {
-            if !history.is_empty() {
-                let _ = memory::save_history(history);
-            }
-            ui::print_goodbye(!history.is_empty());
-            Some(true) // 退出
+pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize) -> CommandResult {
+    let cmd_lower = cmd.to_lowercase();
+
+    // 匹配退出命令
+    if cmd_lower == "/exit" || cmd_lower == "/quit" {
+        if !history.is_empty() {
+            let _ = memory::save_history(history);
         }
+        ui::print_goodbye(!history.is_empty());
+        return CommandResult::Exit;
+    }
+
+    // 匹配 /effort 命令（支持带参数的子命令）
+    if cmd_lower.starts_with("/effort") {
+        return handle_effort(&cmd_lower);
+    }
+
+    // 精确匹配其他命令
+    match cmd_lower.as_str() {
         "/help" => {
             ui::print_help();
-            None
+            CommandResult::Continue
         }
         "/clear" => {
             history.clear();
             let _ = std::fs::remove_file(config::history_path());
             ui::print_success("对话历史已清空");
-            None
+            CommandResult::Continue
         }
         "/save" => {
             if history.is_empty() {
@@ -44,7 +60,7 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
                     Err(e) => ui::print_error(&format!("保存失败: {e}")),
                 }
             }
-            None
+            CommandResult::Continue
         }
         "/load" => {
             match memory::load_history() {
@@ -59,7 +75,7 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
                 }
                 Err(e) => ui::print_error(&format!("加载失败: {e}")),
             }
-            None
+            CommandResult::Continue
         }
         "/history" => {
             if history.is_empty() {
@@ -95,11 +111,64 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
                 }
                 ui::print_divider();
             }
-            None
+            CommandResult::Continue
         }
         _ => {
             ui::print_error(&format!("未知命令: {cmd}。输入 /help 查看可用命令"));
-            None
+            CommandResult::Continue
+        }
+    }
+}
+
+/// 处理 `/effort` 命令
+///
+/// 用法:
+/// - `/effort`           — 显示当前 effort level
+/// - `/effort concise`   — 切换为精炼模式
+/// - `/effort normal`    — 切换为正常模式
+/// - `/effort elaborate` — 切换为详细模式
+fn handle_effort(cmd: &str) -> CommandResult {
+    // 提取参数: "/effort" 或 "/effort concise"
+    let arg = cmd
+        .strip_prefix("/effort")
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+
+    if arg.is_empty() {
+        // 仅显示当前 level
+        let current = config::get_effort_level();
+        println!(
+            "{} 当前努力程度: {}",
+            ui::s_dim("🎯"),
+            style(current.display_name()).cyan().bold()
+        );
+        println!(
+            "  {} /effort {}",
+            ui::s_dim("💡 可用值:"),
+            ui::s_dim("concise | normal | elaborate")
+        );
+        return CommandResult::Continue;
+    }
+
+    match config::EffortLevel::from_str(&arg) {
+        Some(level) => {
+            let current = config::get_effort_level();
+            if level == current {
+                ui::print_info(&format!("努力程度已是 {}，无需更改", level.display_name()));
+                CommandResult::Continue
+            } else {
+                config::set_dynamic_effort(level);
+                ui::print_success(&format!("努力程度已切换为: {}", level.display_name()));
+                println!("  {} Agent 将在下一轮对话时使用新设置重建", ui::s_dim("🔄"));
+                CommandResult::RebuildAgent
+            }
+        }
+        None => {
+            ui::print_error(&format!(
+                "无效的努力程度: \"{arg}\"。有效值: concise, normal, elaborate"
+            ));
+            CommandResult::Continue
         }
     }
 }
