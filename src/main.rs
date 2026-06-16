@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use crate::CmdError::StringError;
 use anyhow::Result;
 use rig::agent::stream_to_stdout;
-use rig::client::Nothing;
 use rig::completion::ToolDefinition;
 use rig::prelude::*;
 use rig::providers::*;
@@ -100,8 +99,8 @@ async fn confirm_execution(cmdline: &str) -> Result<(), CmdError> {
 
 #[derive(Deserialize, Debug)]
 struct OperationArgs {
-    cmd: String,
-    args: serde_json::value::Value,
+    /// 完整的命令行语句，已包含所有参数（如 "Get-ChildItem -Path d:\"）
+    command: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -128,40 +127,28 @@ impl Tool for RunCmd {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "RunCmd".to_string(),
-            description: r#"在本地操作系统中安全地执行系统命令或脚本。支持跨平台 (Windows/Linux/macOS)。
-            【⚠️ 关键规则】你必须将主命令与参数严格分离！
-            - ✅ Windows 正确示例：执行目录列表 -> cmd: "Get-ChildItem", args: ["-Path", "d:\"]
-            - ✅ Linux 正确示例：执行长列表 -> cmd: "ls", args: ["-l", "/var/log"]
-            - ❌ 错误示例：cmd: "dir /b d:\\" , args: [] （绝对不要把参数拼接到 cmd 字段中）
-            【注意】如果命令不需要任何参数，args 必须传入空数组 []。禁止执行破坏性或高危的恶意命令。"#.to_string(),
+            description: r#"在本地操作系统中安全地执行完整的命令行语句。支持跨平台 (Windows/Linux/macOS)。
+            【⚠️ 关键】command 必须是完整且可直接执行的单行命令字符串，已包含所有参数。
+            - ✅ Windows 正确示例：`"Get-ChildItem -Path d:\\"`、`"dir d:\\"`
+            - ✅ Linux/macOS 正确示例：`"ls -l /var/log"`、`"grep -r foo ./src"`
+            - ❌ 错误示例：不要把命令和参数分成两个字段传入。
+            【注意】Windows 使用 PowerShell 执行，Linux/macOS 使用 sh 执行。禁止执行破坏性或高危的恶意命令。"#.to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "cmd": {
+                    "command": {
                         "type": "string",
-                        "description": "要执行的主程序或命令名称。在 Windows 环境下，默认运行 PowerShell 环境，请使用 PowerShell 语法和命令（如 'Get-ChildItem', 'Write-Host'）；在 Linux/macOS 下使用 Bash/Zsh 命令（如 'ls', 'echo'）。不要包含任何参数"
-                    },
-                    "args": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "命令行参数数组，每个参数必须是独立的字符串元素。无参数时传空数组 []。在 Windows 下传递文件路径时，直接使用单反斜杠 '\\' 即可（例如 'd:\\test'），不要使用双反斜杠 '\\\\'"
+                        "description": "完整的命令行字符串，包含程序名和所有参数。Windows 下使用 PowerShell 语法，Linux/macOS 下使用 Bash/Shell 语法。"
                     }
                 },
-                "required": ["cmd", "args"],
+                "required": ["command"],
             }),
         }
     }
 
     #[tracing::instrument(level = "trace", ret)]
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let cmd = args.cmd;
-        let cmd_args: Vec<String> = serde_json::from_value(args.args).unwrap_or_default();
-
-        let cmdline = if cmd_args.is_empty() {
-            cmd.clone()
-        } else {
-            format!("{} {}", cmd, cmd_args.join(" "))
-        };
+        let cmdline = args.command;
 
         // Permission gate
         confirm_execution(&cmdline).await?;
@@ -181,7 +168,9 @@ impl Tool for RunCmd {
                 ])
                 .output()
         } else {
-            std::process::Command::new(&cmd).args(&cmd_args).output()
+            std::process::Command::new("sh")
+                .args(["-c", &cmdline])
+                .output()
         }
         .map_err(|e| CmdError::StdError(e))?;
 
@@ -234,7 +223,7 @@ async fn main() -> Result<()> {
     // Load persisted permission state
     load_permanent_permission();
 
-    let client = deepseek::Client::new("key")?; //ollama::Client::new(Nothing)?;
+    let client = deepseek::Client::new("sk-d8c73a5fda5b4df89b381c74689b3722")?; //ollama::Client::new(Nothing)?;
 
     let agent = client
         .agent("deepseek-v4-flash")
