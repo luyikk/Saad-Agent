@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
 
         // 内置斜杠命令
         if prompt.starts_with('/') {
-            if command::handle_command(&prompt, &mut history, max_history) == Some(true) {
+            if let Some(true) = command::handle_command(&prompt, &mut history, max_history) {
                 break;
             }
             continue;
@@ -120,11 +120,19 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
     let cwd =
         std::env::current_dir().map_or_else(|_| "未知".to_string(), |p| p.display().to_string());
 
-    let notes = [
+    let mut notes = vec![
         "- 所有相对路径都基于上述工作目录".to_string(),
         "- 在执行命令或读写文件时，优先使用绝对路径".to_string(),
         "- 如果不确定某个文件的位置，先用 Get-ChildItem / ls 探索目录结构".to_string(),
     ];
+
+    // Windows + 非 PowerShell 7 → 禁止 && 语法
+    if cfg!(target_os = "windows") && !ps_supports_and_and() {
+        notes.push(
+            "- 当前环境为 Windows PowerShell 5.1，绝对禁止使用 '&&' 或 '||' 连接命令！请用 ';' 分隔或分次执行。"
+                .to_string(),
+        );
+    }
 
     let preamble = format!(
         r"你是一个专业的程序员助手，可以执行命令和读写文件来帮助用户完成任务。
@@ -149,6 +157,21 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
         .tool(tool::fs::ReadFile)
         .tool(tool::fs::WriteFile)
         .build()
+}
+
+/// 检测当前 PowerShell 是否支持 `&&` 连接语法（PS 7+ 才支持）
+fn ps_supports_and_and() -> bool {
+    std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$PSVersionTable.PSVersion.Major -ge 7",
+        ])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .is_some_and(|s| s.trim() == "True")
 }
 
 /// 读取一行用户输入，返回 `None` 表示 EOF/Ctrl+C

@@ -89,10 +89,8 @@ where
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                let success = !summary.to_lowercase().contains("error")
-                    && !summary.to_lowercase().contains("failed");
                 let preview = crate::ui::truncate_str(&summary, 200);
-                let _ = display.on_tool_result(success, &preview);
+                let _ = display.on_tool_result(true, &preview);
             }
 
             // ── Provider Completion 调用详情 ──
