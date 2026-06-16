@@ -16,6 +16,7 @@ schemars = "1"
 thiserror = "2"
 encoding_rs = "0.8"
 dotenvy = "0.15"
+futures-util = { version = "0.3",features = ["std"] }
 
 # ── 专业 CLI UI ──
 console = "0.16"       # 终端样式/颜色/对齐

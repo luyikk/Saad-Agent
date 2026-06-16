@@ -81,8 +81,9 @@ pub async fn confirm_execution(cmdline: &str) -> Result<(), AgentError> {
 
     // 使用 dialoguer 交互选择
     match crate::ui::select_permission("即将执行命令:", cmdline) {
-        Some(selection) => handle_selection(selection, &format!("命令执行: {cmdline}"))
-            .map_err(AgentError::Other),
+        Some(selection) => {
+            handle_selection(selection, &format!("命令执行: {cmdline}")).map_err(AgentError::Other)
+        }
         None => Err(AgentError::Other("权限选择已取消".to_string())),
     }
 }

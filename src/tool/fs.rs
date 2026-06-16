@@ -59,7 +59,8 @@ impl Tool for ReadFile {
 
         tracing::trace!("读取文件: {path}，最大行数: {max_lines}");
 
-        let content = std::fs::read_to_string(path)
+        let content = tokio::fs::read_to_string(path)
+            .await
             .map_err(|e| AgentError::Other(format!("无法读取文件 '{path}': {e}")))?;
 
         let lines: Vec<&str> = content.lines().collect();
@@ -146,7 +147,7 @@ impl Tool for WriteFile {
         // 确保父目录存在
         if let Some(parent) = std::path::Path::new(path).parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
                     AgentError::Other(format!("无法创建目录 '{}': {}", parent.display(), e))
                 })?;
             }
@@ -154,7 +155,8 @@ impl Tool for WriteFile {
 
         tracing::trace!("写入文件: {path}，{} 字节", content.len());
 
-        std::fs::write(path, content)
+        tokio::fs::write(path, content)
+            .await
             .map_err(|e| AgentError::Other(format!("无法写入文件 '{path}': {e}")))?;
 
         Ok(format!(

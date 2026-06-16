@@ -1,263 +1,31 @@
+//! Saad Agent — AI 编程助手
+//!
+//! 基于 DeepSeek 模型的智能命令行助手，可执行系统命令、
+//! 读写文件来帮助用户完成编程任务。
+
 use std::io::Write;
 
 use anyhow::Result;
 use console::style;
-use rig::agent::stream_to_stdout;
-use rig::completion::{AssistantContent, Message, Usage};
-use rig::message::{Text, UserContent};
+use futures_util::stream::StreamExt;
+use rig::agent::{FinalResponse, MultiTurnStreamItem, Text};
+use rig::message::Message;
 use rig::prelude::*;
 use rig::providers::deepseek;
 use rig::providers::deepseek::Client as DeepSeekClient;
-use rig::streaming::StreamingChat;
-use serde::{Deserialize, Serialize};
+use rig::streaming::{StreamedAssistantContent, StreamingChat};
 use tokio::io::AsyncBufReadExt;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::*;
 
+mod command;
 mod config;
 mod error;
+mod history;
 mod permission;
 mod tool;
 mod ui;
-
-// ============================================================
-// 对话历史持久化类型
-// ============================================================
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct SavedMessage {
-    role: String,
-    content: String,
-}
-
-impl SavedMessage {
-    fn from_rig(msg: &Message) -> Self {
-        let (role, content) = match msg {
-            Message::System { content } => ("system".to_string(), content.clone()),
-            Message::User { content } => {
-                let text = content
-                    .iter()
-                    .filter_map(|c| match c {
-                        UserContent::Text(t) => Some(t.text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                ("user".to_string(), text)
-            }
-            Message::Assistant { content, .. } => {
-                let text = content
-                    .iter()
-                    .filter_map(|c| match c {
-                        AssistantContent::Text(t) => Some(t.text.clone()),
-                        AssistantContent::Reasoning(r) => Some(r.display_text()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                ("assistant".to_string(), text)
-            }
-        };
-        SavedMessage { role, content }
-    }
-
-    fn to_rig(&self) -> Message {
-        match self.role.as_str() {
-            "system" => Message::System {
-                content: self.content.clone(),
-            },
-            "user" => Message::User {
-                content: rig::one_or_many::OneOrMany::one(UserContent::Text(Text::new(
-                    self.content.clone(),
-                ))),
-            },
-            _ => Message::Assistant {
-                id: None,
-                content: rig::one_or_many::OneOrMany::one(AssistantContent::Text(Text::new(
-                    self.content.clone(),
-                ))),
-            },
-        }
-    }
-}
-
-/// 保存对话历史到 JSON 文件
-fn save_history(history: &[Message]) -> Result<()> {
-    let path = config::history_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let saved: Vec<SavedMessage> = history.iter().map(SavedMessage::from_rig).collect();
-    let json = serde_json::to_string_pretty(&saved)?;
-    std::fs::write(&path, json)?;
-    tracing::debug!("对话历史已保存到: {}", path.display());
-    Ok(())
-}
-
-/// 从 JSON 文件加载对话历史
-fn load_history() -> Result<Vec<Message>> {
-    let path = config::history_path();
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    let json = std::fs::read_to_string(&path)?;
-    let saved: Vec<SavedMessage> = serde_json::from_str(&json)?;
-    let messages: Vec<Message> = saved.iter().map(SavedMessage::to_rig).collect();
-    tracing::debug!("从 {} 加载了 {} 条历史消息", path.display(), messages.len());
-    Ok(messages)
-}
-
-/// 限制对话历史长度，保留最近的 N 条消息
-fn trim_history(history: &mut Vec<Message>, max: usize) {
-    if history.len() > max {
-        let remove = history.len() - max;
-        history.drain(0..remove);
-        tracing::debug!("对话历史已截断，移除了 {} 条旧消息", remove);
-    }
-}
-
-/// 从 Message 中提取文本用于预览
-fn message_preview(msg: &Message, max_chars: usize) -> String {
-    let text = match msg {
-        Message::System { content } => content.clone(),
-        Message::User { content } => content
-            .iter()
-            .filter_map(|c| match c {
-                UserContent::Text(t) => Some(t.text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Message::Assistant { content, .. } => content
-            .iter()
-            .filter_map(|c| match c {
-                AssistantContent::Text(t) => Some(t.text.clone()),
-                AssistantContent::Reasoning(r) => Some(r.display_text()),
-                AssistantContent::ToolCall(tc) => Some(format!("[ToolCall: {}]", tc.function.name)),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-    };
-
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() > max_chars {
-        format!(
-            "{}...",
-            chars.into_iter().take(max_chars).collect::<String>()
-        )
-    } else {
-        text
-    }
-}
-
-fn message_role_name(msg: &Message) -> &'static str {
-    match msg {
-        Message::System { .. } => "system",
-        Message::User { .. } => "user",
-        Message::Assistant { .. } => "assistant",
-    }
-}
-
-// ============================================================
-// 命令处理
-// ============================================================
-
-/// 处理内置斜杠命令。返回 `Some(true)` 表示应退出程序。
-async fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize) -> Option<bool> {
-    match cmd.to_lowercase().as_str() {
-        "/exit" | "/quit" => {
-            if !history.is_empty() {
-                let _ = save_history(history);
-            }
-            ui::print_goodbye(!history.is_empty());
-            Some(true) // 退出
-        }
-        "/help" => {
-            ui::print_help();
-            None
-        }
-        "/clear" => {
-            history.clear();
-            let _ = std::fs::remove_file(config::history_path());
-            ui::print_success("对话历史已清空");
-            None
-        }
-        "/save" => {
-            if history.is_empty() {
-                ui::print_warning("对话历史为空，无需保存");
-            } else {
-                match save_history(history) {
-                    Ok(()) => {
-                        ui::print_success(&format!("对话历史已保存 ({} 条消息)", history.len()))
-                    }
-                    Err(e) => ui::print_error(&format!("保存失败: {}", e)),
-                }
-            }
-            None
-        }
-        "/load" => {
-            match load_history() {
-                Ok(loaded) => {
-                    if loaded.is_empty() {
-                        ui::print_warning("没有找到保存的对话历史");
-                    } else {
-                        let count = loaded.len();
-                        *history = loaded;
-                        ui::print_success(&format!("已加载 {} 条历史消息", count));
-                    }
-                }
-                Err(e) => ui::print_error(&format!("加载失败: {}", e)),
-            }
-            None
-        }
-        "/history" => {
-            if history.is_empty() {
-                ui::print_info("当前对话历史为空");
-            } else {
-                println!(
-                    "{} 当前对话历史: {} 条消息 (限制: {} 条)",
-                    ui::s_dim("📝"),
-                    style(history.len()).yellow(),
-                    max_history
-                );
-                let start = if history.len() > 5 {
-                    history.len() - 5
-                } else {
-                    0
-                };
-                ui::print_divider();
-                for (i, msg) in history.iter().enumerate().skip(start) {
-                    let role = message_role_name(msg);
-                    let role_styled = match role {
-                        "user" => style("user").cyan(),
-                        "assistant" => style("assistant").green(),
-                        "system" => style("system").dim(),
-                        _ => style(role),
-                    };
-                    let preview = message_preview(msg, 70);
-                    println!(
-                        "  [{}] {} {}",
-                        style(i).dim(),
-                        role_styled,
-                        style(preview).dim()
-                    );
-                }
-                ui::print_divider();
-            }
-            None
-        }
-        _ => {
-            ui::print_error(&format!("未知命令: {cmd}。输入 /help 查看可用命令"));
-            None
-        }
-    }
-}
-
-// ============================================================
-// Main
-// ============================================================
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -316,14 +84,14 @@ async fn main() -> Result<()> {
         .name("Saad")
         .default_max_turns(config::DEFAULT_MAX_TURNS)
         .temperature(config::DEFAULT_TEMPERATURE)
-        .max_tokens(config::DEFAULT_MAX_TOKENS as u64)
+        .max_tokens(config::get_max_tokens() as u64)
         .tool(tool::cmd::RunCmd)
         .tool(tool::fs::ReadFile)
         .tool(tool::fs::WriteFile)
         .build();
 
     // ---- 加载对话历史 ----
-    let mut history: Vec<Message> = load_history().unwrap_or_else(|e| {
+    let mut history: Vec<Message> = history::load_history().unwrap_or_else(|e| {
         tracing::warn!("加载对话历史失败: {}，将使用全新对话", e);
         vec![]
     });
@@ -355,7 +123,7 @@ async fn main() -> Result<()> {
                 // Ctrl+C → 优雅退出
                 println!();
                 if !history.is_empty() {
-                    if let Err(e) = save_history(&history) {
+                    if let Err(e) = history::save_history(&history) {
                         tracing::warn!("保存对话历史失败: {}", e);
                     }
                 }
@@ -383,7 +151,7 @@ async fn main() -> Result<()> {
 
         // ---- 处理内置命令 ----
         if prompt.starts_with('/') {
-            if let Some(true) = handle_command(&prompt, &mut history, max_history).await {
+            if let Some(true) = command::handle_command(&prompt, &mut history, max_history).await {
                 break; // 退出
             }
             continue;
@@ -397,30 +165,46 @@ async fn main() -> Result<()> {
         let mut stream = agent.stream_chat(prompt, &history).await;
         spinner.finish_and_clear();
 
-        let res = stream_to_stdout(&mut stream).await?;
+        // ── 流式渲染器 ──
+        let mut display = ui::StreamDisplay::new();
+        let mut final_res = FinalResponse::empty();
+
+        while let Some(content) = stream.next().await {
+            match content {
+                Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
+                    Text { text, .. },
+                ))) => {
+                    display.on_answer(&text)?;
+                }
+
+                Ok(MultiTurnStreamItem::StreamAssistantItem(
+                    StreamedAssistantContent::Reasoning(reasoning),
+                )) => {
+                    display.on_reasoning(&reasoning.display_text())?;
+                }
+
+                Ok(MultiTurnStreamItem::FinalResponse(res)) => {
+                    final_res = res;
+                }
+
+                Err(err) => {
+                    display.on_error(&format!("AI 响应流错误: {err}"));
+                }
+
+                _ => {}
+            }
+        }
+
+        // 打印 Token 统计
+        display.finalize(&final_res.usage());
 
         // 更新对话历史
-        if let Some(new_history) = res.history() {
+        if let Some(new_history) = final_res.history() {
             history.extend_from_slice(new_history);
         }
 
         // 限制历史长度
-        trim_history(&mut history, max_history);
-
-        // Token 使用统计 (Usage 字段为 u64，非 Option)
-        let usage: Usage = res.usage();
-        if usage.total_tokens > 0 {
-            println!(
-                "\n{} {}",
-                ui::s_dim("📊"),
-                ui::s_dim(&format!(
-                    "Token: 输入 {} | 输出 {} | 总计 {}",
-                    usage.input_tokens, usage.output_tokens, usage.total_tokens
-                ))
-            );
-        }
-
-        println!();
+        history::trim_history(&mut history, max_history);
     }
 
     std::process::exit(0);

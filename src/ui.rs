@@ -1,7 +1,10 @@
 /// 终端 UI 工具模块
 ///
 /// 封装 console / dialoguer / indicatif，提供统一的美化终端输出。
+use std::io::{self, Write};
+
 use console::{style, Alignment, Style, Term};
+use rig::completion::Usage;
 
 // ── 快捷样式 ──
 
@@ -216,4 +219,120 @@ pub fn new_spinner(msg: &str) -> indicatif::ProgressBar {
     pb.set_message(msg.to_string());
     pb.enable_steady_tick(std::time::Duration::from_millis(80));
     pb
+}
+
+// ── 流式响应渲染器 ──
+
+/// AI 流式响应的终端渲染器。
+///
+/// 封装"深度思考 → 回答 → 统计"三阶段的状态机，
+/// 利用 `console::Term` 提供专业的终端渲染效果。
+pub struct StreamDisplay {
+    term: Term,
+    state: StreamPhase,
+    /// 分隔线宽度（取终端宽度与 80 的较小值）
+    line_w: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamPhase {
+    /// 尚未输出任何内容
+    Idle,
+    /// 正在输出推理链（DeepSeek-R1 等思维链模型）
+    Reasoning,
+    /// 正在输出最终回答
+    Answer,
+}
+
+impl StreamDisplay {
+    /// 创建新的流式渲染器
+    pub fn new() -> Self {
+        let width = Term::stdout().size().1 as usize;
+        Self {
+            term: Term::stdout(),
+            state: StreamPhase::Idle,
+            line_w: width.min(80),
+        }
+    }
+
+    /// 打印推理链阶段的区块头部
+    fn enter_reasoning(&mut self) -> io::Result<()> {
+        if self.state == StreamPhase::Reasoning {
+            return Ok(());
+        }
+        // 如果之前正在输出回答，先补一个换行
+        if self.state == StreamPhase::Answer {
+            writeln!(self.term)?;
+        }
+        writeln!(self.term)?;
+        self.print_phase_header("🧠", "深度思考")?;
+        self.state = StreamPhase::Reasoning;
+        Ok(())
+    }
+
+    /// 打印回答阶段的区块头部
+    fn enter_answer(&mut self) -> io::Result<()> {
+        if self.state == StreamPhase::Answer {
+            return Ok(());
+        }
+        if self.state == StreamPhase::Reasoning {
+            writeln!(self.term)?;
+        }
+        writeln!(self.term)?;
+        self.print_phase_header("💬", "回答")?;
+        self.state = StreamPhase::Answer;
+        Ok(())
+    }
+
+    /// 打印阶段头部：`🧠 深度思考 ──────────────────────`
+    fn print_phase_header(&mut self, icon: &str, label: &str) -> io::Result<()> {
+        let fill = self.line_w.saturating_sub(label.len() + 4); // icon + 空格 + label + 空格
+        writeln!(
+            self.term,
+            "{} {} {}",
+            icon,
+            style(label).bold(),
+            s_dim(&"─".repeat(fill))
+        )
+    }
+
+    // ── 公开方法，供 main.rs 的 stream 循环调用 ──
+
+    /// 处理推理链 token
+    pub fn on_reasoning(&mut self, text: &str) -> io::Result<()> {
+        self.enter_reasoning()?;
+        write!(self.term, "{}", text)?;
+        self.term.flush()
+    }
+
+    /// 处理回答 token
+    pub fn on_answer(&mut self, text: &str) -> io::Result<()> {
+        self.enter_answer()?;
+        write!(self.term, "{}", text)?;
+        self.term.flush()
+    }
+
+    /// 处理流错误
+    pub fn on_error(&mut self, err: &str) {
+        let _ = writeln!(self.term);
+        let _ = writeln!(self.term, "{} {}", s_error("✗"), s_error(err));
+    }
+
+    /// 打印最终统计信息并收尾
+    pub fn finalize(&mut self, usage: &Usage) {
+        let _ = writeln!(self.term);
+        if usage.total_tokens > 0 {
+            let dash = "─".repeat(self.line_w.saturating_sub(30).max(10));
+            let _ = writeln!(
+                self.term,
+                "{}  {}",
+                s_dim("📊"),
+                s_dim(&format!(
+                    "Token 统计 —{} 输入 {} | 输出 {} | 总计 {}",
+                    dash, usage.input_tokens, usage.output_tokens, usage.total_tokens
+                ))
+            );
+        }
+        let _ = writeln!(self.term);
+    }
 }
