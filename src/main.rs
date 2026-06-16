@@ -35,14 +35,17 @@ async fn main() -> Result<()> {
     let mut agent = build_agent(&client);
 
     // ---- 加载对话历史 ----
-    let mut history = memory::load_history().unwrap_or_else(|e| {
-        tracing::warn!("加载对话历史失败: {}，将使用全新对话", e);
-        vec![]
-    });
     let max_history = config::get_max_history_messages();
+    let (loaded_messages, loaded_summary) =
+        memory::ConversationMemory::load_from_disk().unwrap_or_else(|e| {
+            tracing::warn!("加载对话历史失败: {}，将使用全新对话", e);
+            (vec![], None)
+        });
+    let mut memory =
+        memory::ConversationMemory::from_parts(loaded_messages, loaded_summary, max_history);
 
     // ---- 欢迎界面 ----
-    ui::print_welcome(history.len());
+    ui::print_welcome(memory.len());
 
     // ---- 主交互循环 ----
     let stdin = tokio::io::stdin();
@@ -54,7 +57,7 @@ async fn main() -> Result<()> {
         std::io::stdout().flush()?;
 
         let Some(prompt) = read_input(&mut reader).await else {
-            save_and_exit(&history)
+            save_and_exit(&memory)
         };
 
         if prompt.is_empty() {
@@ -63,7 +66,7 @@ async fn main() -> Result<()> {
 
         // 内置斜杠命令
         if prompt.starts_with('/') {
-            match command::handle_command(&prompt, &mut history, max_history) {
+            match command::handle_command(&prompt, memory.messages_mut(), max_history) {
                 command::CommandResult::Exit => break,
                 command::CommandResult::RebuildAgent => {
                     agent = build_agent(&client);
@@ -73,22 +76,28 @@ async fn main() -> Result<()> {
             continue;
         }
 
+        // 构建上下文消息（摘要 + 当前消息）
+        let context = memory.build_context();
+
         // ---- 发送消息并流式输出 ----
-        tracing::debug!("发送消息 (历史长度: {})", history.len());
+        tracing::debug!("发送消息 (历史长度: {})", context.len());
         let mut display = ui::StreamDisplay::new();
 
         let final_res = stream_handler::process_stream(
             &prompt,
-            agent.stream_chat(&prompt, &history).await,
+            agent.stream_chat(&prompt, &context).await,
             &mut display,
         )
         .await?;
 
         // 更新对话历史
         if let Some(new_history) = final_res.history() {
-            history.extend_from_slice(new_history);
+            memory.extend(new_history);
         }
-        memory::trim_history(&mut history, max_history);
+
+        // 智能压缩（超过 max_history 时用 AI 摘要）
+        let compact_model = client.completion_model(config::get_model_name());
+        memory.compact(&compact_model).await?;
     }
 
     std::process::exit(0);
@@ -213,12 +222,12 @@ async fn read_input(reader: &mut tokio::io::BufReader<tokio::io::Stdin>) -> Opti
 }
 
 /// 保存历史并优雅退出
-fn save_and_exit(history: &[rig::message::Message]) -> ! {
-    if !history.is_empty() {
-        if let Err(e) = memory::save_history(history) {
+fn save_and_exit(mem: &memory::ConversationMemory) -> ! {
+    if !mem.is_empty() {
+        if let Err(e) = mem.save_to_disk() {
             tracing::warn!("保存对话历史失败: {}", e);
         }
     }
-    ui::print_goodbye(!history.is_empty());
+    ui::print_goodbye(!mem.is_empty());
     std::process::exit(0);
 }

@@ -26,7 +26,7 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
     // 匹配退出命令
     if cmd_lower == "/exit" || cmd_lower == "/quit" {
         if !history.is_empty() {
-            let _ = memory::save_history(history);
+            let _ = memory::save_history(history, None);
         }
         ui::print_goodbye(!history.is_empty());
         return CommandResult::Exit;
@@ -53,7 +53,7 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
             if history.is_empty() {
                 ui::print_warning("对话历史为空，无需保存");
             } else {
-                match memory::save_history(history) {
+                match memory::save_history(history, None) {
                     Ok(()) => {
                         ui::print_success(&format!("对话历史已保存 ({} 条消息)", history.len()));
                     }
@@ -63,13 +63,13 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
             CommandResult::Continue
         }
         "/load" => {
-            match memory::load_history() {
-                Ok(loaded) => {
-                    if loaded.is_empty() {
+            match memory::ConversationMemory::load_from_disk() {
+                Ok((messages, _summary)) => {
+                    if messages.is_empty() {
                         ui::print_warning("没有找到保存的对话历史");
                     } else {
-                        let count = loaded.len();
-                        *history = loaded;
+                        let count = messages.len();
+                        *history = messages;
                         ui::print_success(&format!("已加载 {count} 条历史消息"));
                     }
                 }
