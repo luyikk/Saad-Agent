@@ -15,7 +15,7 @@ pub const DEFAULT_TEMPERATURE: f64 = 0.5;
 pub const DEFAULT_MAX_TOKENS: usize = 384_000;
 
 /// 对话历史保留的最大消息数（防止 token 超限）
-pub const MAX_HISTORY_MESSAGES: usize = 40;
+pub const MAX_HISTORY_MESSAGES: usize = 20;
 
 /// 获取 API Key（优先从环境变量读取）
 pub fn get_api_key() -> Result<String, String> {

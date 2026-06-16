@@ -23,9 +23,9 @@ pub struct ConversationMemory {
     summary: Option<String>,
 }
 
-#[allow(dead_code)]
 impl ConversationMemory {
     /// 创建新的记忆体
+    #[allow(dead_code)]
     pub fn new(max_messages: usize) -> Self {
         Self {
             messages: Vec::new(),
@@ -35,7 +35,11 @@ impl ConversationMemory {
     }
 
     /// 从已有消息列表创建（用于加载历史）
-    pub fn from_parts(messages: Vec<Message>, summary: Option<String>, max_messages: usize) -> Self {
+    pub fn from_parts(
+        messages: Vec<Message>,
+        summary: Option<String>,
+        max_messages: usize,
+    ) -> Self {
         Self {
             messages,
             max_messages,
@@ -45,6 +49,7 @@ impl ConversationMemory {
 
     // ── 基本访问 ──
 
+    #[allow(dead_code)]
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
@@ -61,10 +66,12 @@ impl ConversationMemory {
         self.messages.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn summary(&self) -> Option<&str> {
         self.summary.as_deref()
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.messages.clear();
         self.summary = None;
@@ -74,6 +81,7 @@ impl ConversationMemory {
         self.messages.extend_from_slice(new_messages);
     }
 
+    #[allow(dead_code)]
     pub fn set_max_messages(&mut self, max: usize) {
         self.max_messages = max;
     }
@@ -93,6 +101,7 @@ impl ConversationMemory {
     }
 
     /// 如果有摘要，返回一条 System Message 可插入对话开头
+    #[allow(dead_code)]
     pub fn summary_message(&self) -> Option<Message> {
         self.summary.as_ref().map(|s| Message::System {
             content: format!("【以下为之前对话的摘要，请基于这些上下文继续对话】\n{s}"),
@@ -104,6 +113,9 @@ impl ConversationMemory {
     /// 当消息数超过 `max_messages` 时，调用 AI 模型压缩前半部分为摘要，
     /// 并保留后半部分继续对话。
     ///
+    /// **安全保证**：先完成 AI 摘要调用，成功后才从内存中移除旧消息。
+    /// 若 AI 调用失败，消息完整保留，不会丢失数据。
+    ///
     /// 返回 `true` 表示执行了压缩。
     pub async fn compact<C>(&mut self, model: &C) -> Result<bool>
     where
@@ -114,7 +126,10 @@ impl ConversationMemory {
         }
 
         let split_at = self.messages.len() / 2;
-        let old_messages: Vec<Message> = self.messages.drain(..split_at).collect();
+
+        // 【修复】先克隆旧消息用于生成摘要，不立即 drain。
+        // 只有 AI 调用成功后才从 Vec 中移除，防止网络/API 故障导致数据丢失。
+        let old_messages: Vec<Message> = self.messages[..split_at].to_vec();
         let conversation_text = format_messages_for_summary(&old_messages);
 
         let summary_prompt = format!(
@@ -122,8 +137,9 @@ impl ConversationMemory {
         );
 
         tracing::info!(
-            "记忆压缩: {} 条消息 → 摘要 (保留 {} 条)",
+            "记忆压缩: {} 条消息 → 摘要 (保留 {} 条，总计 {} 条)",
             old_messages.len(),
+            self.messages.len() - old_messages.len(),
             self.messages.len()
         );
 
@@ -146,13 +162,25 @@ impl ConversationMemory {
                         self.summary.as_ref().map_or(0, |s| s.len())
                     );
                 }
+
+                // ✅ 摘要成功后，安全移除旧消息
+                self.messages.drain(..split_at);
+                Ok(true)
             }
             Err(e) => {
-                tracing::warn!("记忆压缩失败，回退到直接截断: {e}");
+                // ✅ 摘要失败，消息完整保留，回退到截断策略
+                tracing::warn!(
+                    "记忆压缩失败，回退到直接截断 (保留最近 {} 条): {e}",
+                    self.max_messages
+                );
+                // 截断到 max_messages 以内（保留最新的消息）
+                if self.messages.len() > self.max_messages {
+                    let excess = self.messages.len() - self.max_messages;
+                    self.messages.drain(..excess);
+                }
+                Ok(true)
             }
         }
-
-        Ok(true)
     }
 
     // ── 持久化 ──
@@ -272,7 +300,7 @@ pub const fn message_role_name(msg: &Message) -> &'static str {
 // ============================================================
 
 /// 保存对话历史到 JSON 文件
-pub fn save_history(messages: &[Message], summary: Option<&str>) -> Result<()> {
+fn save_history(messages: &[Message], summary: Option<&str>) -> Result<()> {
     let path = config::history_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -308,9 +336,12 @@ fn load_history() -> Result<(Vec<Message>, Option<String>)> {
     }
 
     // 尝试新格式，失败则回退到旧格式（纯消息数组）
-    let history: HistoryFile = serde_json::from_str(&json).unwrap_or_else(|_| HistoryFile {
-        summary: None,
-        messages: serde_json::from_str(&json).unwrap_or_default(),
+    let history: HistoryFile = serde_json::from_str(&json).unwrap_or_else(|e| {
+        tracing::warn!("历史文件格式不兼容，尝试旧格式: {e}");
+        HistoryFile {
+            summary: None,
+            messages: serde_json::from_str(&json).unwrap_or_default(),
+        }
     });
 
     tracing::debug!(

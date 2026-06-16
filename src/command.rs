@@ -3,10 +3,10 @@
 //! 处理用户在交互界面中输入的 `/` 前缀命令。
 
 use console::style;
-use rig::message::Message;
 
 use crate::config;
 use crate::memory;
+use crate::memory::ConversationMemory;
 use crate::ui;
 
 /// 命令处理结果
@@ -20,47 +20,43 @@ pub enum CommandResult {
 }
 
 /// 处理内置斜杠命令。
-pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize) -> CommandResult {
+pub fn handle_command(
+    cmd: &str,
+    memory: &mut ConversationMemory,
+    max_history: usize,
+) -> anyhow::Result<CommandResult> {
     let cmd_lower = cmd.to_lowercase();
-
     // 匹配退出命令
     if cmd_lower == "/exit" || cmd_lower == "/quit" {
-        if !history.is_empty() {
-            let _ = memory::save_history(history, None);
-        }
-        ui::print_goodbye(!history.is_empty());
-        return CommandResult::Exit;
+        memory.save_to_disk()?;
+        ui::print_goodbye(!memory.is_empty());
+        return Ok(CommandResult::Exit);
     }
 
     // 匹配 /effort 命令（支持带参数的子命令）
     if cmd_lower.starts_with("/effort") {
-        return handle_effort(&cmd_lower);
+        return Ok(handle_effort(&cmd_lower));
     }
 
     // 精确匹配其他命令
     match cmd_lower.as_str() {
         "/help" => {
             ui::print_help();
-            CommandResult::Continue
+            Ok(CommandResult::Continue)
         }
         "/clear" => {
-            history.clear();
-            let _ = std::fs::remove_file(config::history_path());
+            memory.clear();
+            std::fs::remove_file(config::history_path())?;
             ui::print_success("对话历史已清空");
-            CommandResult::Continue
+            Ok(CommandResult::Continue)
         }
         "/save" => {
-            if history.is_empty() {
+            if memory.is_empty() {
                 ui::print_warning("对话历史为空，无需保存");
             } else {
-                match memory::save_history(history, None) {
-                    Ok(()) => {
-                        ui::print_success(&format!("对话历史已保存 ({} 条消息)", history.len()));
-                    }
-                    Err(e) => ui::print_error(&format!("保存失败: {e}")),
-                }
+                memory.save_to_disk()?;
             }
-            CommandResult::Continue
+            Ok(CommandResult::Continue)
         }
         "/load" => {
             match memory::ConversationMemory::load_from_disk() {
@@ -69,31 +65,32 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
                         ui::print_warning("没有找到保存的对话历史");
                     } else {
                         let count = messages.len();
-                        *history = messages;
+
+                        *memory.messages_mut() = messages;
                         ui::print_success(&format!("已加载 {count} 条历史消息"));
                     }
                 }
                 Err(e) => ui::print_error(&format!("加载失败: {e}")),
             }
-            CommandResult::Continue
+            Ok(CommandResult::Continue)
         }
         "/history" => {
-            if history.is_empty() {
+            if memory.is_empty() {
                 ui::print_info("当前对话历史为空");
             } else {
                 println!(
                     "{} 当前对话历史: {} 条消息 (限制: {} 条)",
                     ui::s_dim("📝"),
-                    style(history.len()).yellow(),
+                    style(memory.len()).yellow(),
                     max_history
                 );
-                let start = if history.len() > 5 {
-                    history.len() - 5
+                let start = if memory.len() > 5 {
+                    memory.len() - 5
                 } else {
                     0
                 };
                 ui::print_divider();
-                for (i, msg) in history.iter().enumerate().skip(start) {
+                for (i, msg) in memory.messages().iter().enumerate().skip(start) {
                     let role = memory::message_role_name(msg);
                     let role_styled = match role {
                         "user" => style("user").cyan(),
@@ -111,11 +108,11 @@ pub fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize)
                 }
                 ui::print_divider();
             }
-            CommandResult::Continue
+            Ok(CommandResult::Continue)
         }
         _ => {
             ui::print_error(&format!("未知命令: {cmd}。输入 /help 查看可用命令"));
-            CommandResult::Continue
+            Ok(CommandResult::Continue)
         }
     }
 }

@@ -36,8 +36,8 @@ async fn main() -> Result<()> {
 
     // ---- 加载对话历史 ----
     let max_history = config::get_max_history_messages();
-    let (loaded_messages, loaded_summary) =
-        memory::ConversationMemory::load_from_disk().unwrap_or_else(|e| {
+    let (loaded_messages, loaded_summary) = memory::ConversationMemory::load_from_disk()
+        .unwrap_or_else(|e| {
             tracing::warn!("加载对话历史失败: {}，将使用全新对话", e);
             (vec![], None)
         });
@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
 
         // 内置斜杠命令
         if prompt.starts_with('/') {
-            match command::handle_command(&prompt, memory.messages_mut(), max_history) {
+            match command::handle_command(&prompt, &mut memory, max_history)? {
                 command::CommandResult::Exit => break,
                 command::CommandResult::RebuildAgent => {
                     agent = build_agent(&client);

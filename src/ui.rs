@@ -44,9 +44,19 @@ pub fn s_cmd(s: &str) -> String {
 #[allow(clippy::cast_precision_loss)]
 fn fmt_tokens(n: u64) -> String {
     if n >= 1_000_000 {
-        format!("{:.2}m", n as f64 / 1_000_000.0)
+        let val = n as f64 / 1_000_000.0;
+        if (val * 100.0).round() % 100.0 == 0.0 {
+            format!("{:.0}m", val)
+        } else {
+            format!("{:.2}m", val)
+        }
     } else if n >= 1_000 {
-        format!("{:.2}k", n as f64 / 1_000.0)
+        let val = n as f64 / 1_000.0;
+        if (val * 100.0).round() % 100.0 == 0.0 {
+            format!("{:.0}k", val)
+        } else {
+            format!("{:.2}k", val)
+        }
     } else {
         n.to_string()
     }
@@ -234,7 +244,6 @@ pub fn select_permission(action_desc: &str, detail: &str) -> Option<usize> {
 
 pub fn new_spinner(msg: &str) -> indicatif::ProgressBar {
     let pb = indicatif::ProgressBar::new_spinner();
-    #[allow(clippy::literal_string_with_formatting_args)]
     pb.set_style(
         indicatif::ProgressStyle::with_template("{spinner:.cyan} {msg}")
             .unwrap()
@@ -262,8 +271,6 @@ pub struct StreamDisplay {
     line_w: usize,
     /// 工具调用计数器（用于编号）
     tool_call_count: u32,
-    /// 累积每个 `CompletionCall` 的 token 用量
-    completion_calls: Vec<(u32, Usage)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,7 +296,6 @@ impl StreamDisplay {
             state: StreamPhase::Idle,
             line_w: width.min(80),
             tool_call_count: 0,
-            completion_calls: Vec::new(),
         }
     }
 
@@ -368,11 +374,11 @@ impl StreamDisplay {
     /// 最多显示 10 行，超出部分显示截断提示。
     fn print_tool_result(&mut self, success: bool, summary: &str) -> io::Result<()> {
         let icon = if success {
-            s_success("✓")
+            s_success("✓ success")
         } else {
-            s_error("✗")
+            s_error("✗ error")
         };
-        writeln!(self.term, "         {icon}")?;
+        writeln!(self.term, "    {icon}")?;
 
         // 多行内容逐行渲染，统一缩进
         const MAX_LINES: usize = 10;
@@ -447,10 +453,6 @@ impl StreamDisplay {
 
     /// 处理 CompletionCall：立即打印本轮 token 用量（Claude Code CLI 风格）
     pub fn on_completion_call(&mut self, call_index: u32, usage: Option<Usage>) {
-        if let Some(ref u) = usage {
-            self.completion_calls.push((call_index, *u));
-        }
-
         // Claude Code CLI 风格: `  ⏺  Turn 1 · 1.2k input · 0.3k output`
         if let Some(u) = usage {
             let turn = call_index + 1; // call_index 是 0-based，显示用 1-based
@@ -498,18 +500,14 @@ impl StreamDisplay {
 }
 
 /// 截断字符串到指定宽度（按字符数，非字节）
+///
+/// 先检查是否需要截断，避免不必要的分配。
 pub fn truncate_str(s: &str, max_chars: usize) -> Cow<'_, str> {
     let chars: Vec<char> = s.chars().collect();
-    if max_chars != 0 && chars.len() > max_chars {
-        format!(
-            "{}...",
-            chars
-                .into_iter()
-                .take(max_chars.saturating_sub(10))
-                .collect::<String>()
-        )
-        .into()
+    if chars.len() <= max_chars {
+        Cow::Borrowed(s)
     } else {
-        s.into()
+        let truncated: String = chars.into_iter().take(max_chars).collect();
+        Cow::Owned(format!("{truncated}..."))
     }
 }

@@ -3,6 +3,8 @@
 /// 提供在本地操作系统中安全执行命令的功能，
 /// 支持 Windows（PowerShell）和 Linux/macOS（sh）。
 /// 在 Windows 上使用 `encoding_rs` 智能处理 GBK/UTF-8 编码转换。
+use std::sync::OnceLock;
+
 use encoding_rs::GBK;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -10,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::AgentError;
+
+/// 缓存的 PowerShell 版本检测结果：`true` 表示 pwsh 可用
+static PW_SH_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 #[derive(Deserialize, Debug)]
 pub struct OperationArgs {
@@ -55,26 +60,17 @@ impl Tool for RunCmd {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let cmdline = args.command;
 
+        // 安全检查：阻止明显的危险命令
+        check_dangerous_command(&cmdline)?;
+
         // 权限检查
         crate::permission::confirm_execution(&cmdline)?;
 
         tracing::trace!("正在执行命令: '{cmdline}'");
 
-        // 【修复1】跨平台 & 跨版本 Shell 适配
+        // 跨平台 & 跨版本 Shell 适配
         let output = if cfg!(target_os = "windows") {
-            // 优先使用 pwsh (PS 7+)，回退到 powershell (5.1)
-            let shell = if std::process::Command::new("pwsh")
-                .arg("--version")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok()
-            {
-                "pwsh"
-            } else {
-                "powershell"
-            };
-
+            let shell = get_windows_shell();
             std::process::Command::new(shell)
                 .args([
                     "-NoProfile",
@@ -94,10 +90,13 @@ impl Tool for RunCmd {
         let stdout = decode_output(&output.stdout);
         let stderr = decode_output(&output.stderr);
 
-        // 【修复4】成功时合并 stdout + stderr，确保 LLM 能获取完整的编译警告与进度
-        let combined = format!("{}\n{}", stdout.trim(), stderr.trim())
-            .trim()
-            .to_string();
+        // 合并 stdout + stderr，确保 LLM 能获取完整的编译警告与进度
+        let combined = [stdout.trim(), stderr.trim()]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
 
         if combined.is_empty() {
             Ok("命令已成功执行，无输出。".to_string())
@@ -107,27 +106,148 @@ impl Tool for RunCmd {
     }
 }
 
+// ── 安全校验 ──
+
+/// 检查命令是否包含已知的危险模式。
+///
+/// 这不是完整的安全沙箱，而是对最常见破坏性命令的启发式拦截。
+/// 如果命令包含危险模式，直接返回错误，不进入权限确认流程。
+fn check_dangerous_command(cmd: &str) -> Result<(), AgentError> {
+    let cmd_lower = cmd.to_lowercase();
+
+    // ── 跨平台危险模式 ──
+    let cross_platform_dangerous: &[&str] = &[
+        // 递归强制删除根目录
+        "rm -rf /",
+        "rm -rf / --no-preserve-root",
+        "rm -r /*",
+        // 覆盖磁盘设备
+        "dd if=",
+        "mkfs.",
+        // Fork 炸弹
+        ":(){ :|:& };:",
+        // curl/wget 管道到 shell（常见攻击向量）
+        "curl ",
+        "wget ",
+    ];
+
+    // curl/wget 管道到 shell 的特殊检测
+    if (cmd_lower.contains("curl") || cmd_lower.contains("wget"))
+        && (cmd_lower.contains("| sh")
+            || cmd_lower.contains("| bash")
+            || cmd_lower.contains("| zsh"))
+    {
+        return Err(AgentError::Other(format!(
+            "🚫 安全拦截：检测到远程脚本管道执行 (curl/wget ... | shell)\n   命令: {cmd}"
+        )));
+    }
+
+    for pattern in cross_platform_dangerous {
+        if cmd_lower.contains(pattern) {
+            return Err(AgentError::Other(format!(
+                "🚫 安全拦截：命令包含危险模式 \"{pattern}\"\n   命令: {cmd}"
+            )));
+        }
+    }
+
+    // ── Windows 特有危险模式 ──
+    if cfg!(target_os = "windows") {
+        let windows_dangerous: &[&str] = &[
+            // 磁盘格式化
+            "format ",
+            "format c:",
+            "format d:",
+            // 递归删除系统盘
+            "del /f /s c:\\",
+            "del /f /s d:\\",
+            "rd /s /q c:\\",
+            "rd /s /q d:\\",
+            // PowerShell 删除根目录
+            "remove-item -path c:\\ -recurse",
+            "remove-item -path d:\\ -recurse",
+            "remove-item c:\\ -recurse",
+            "remove-item d:\\ -recurse",
+            "ri c:\\ -recurse",
+            "ri d:\\ -recurse",
+            // 清除事件日志/磁盘
+            "clear-disk",
+            "format-volume",
+            // 禁用安全功能
+            "set-executionpolicy unrestricted",
+            "disable-computerrestore",
+            // 删除注册表关键项
+            "remove-item hklm:",
+            "remove-item hkcu:",
+            "del hklm:",
+        ];
+
+        for pattern in windows_dangerous {
+            if cmd_lower.contains(pattern) {
+                return Err(AgentError::Other(format!(
+                    "🚫 安全拦截：命令包含危险模式 \"{pattern}\"\n   命令: {cmd}"
+                )));
+            }
+        }
+    }
+
+    // ── Unix 特有危险模式 ──
+    if !cfg!(target_os = "windows") {
+        let unix_dangerous: &[&str] = &[
+            "> /dev/sda",
+            "> /dev/hda",
+            "> /dev/nvme",
+            "mkfs.",
+            "chmod 777 /",
+            "chown -r root:root /",
+            ":(){ :|:& };:",
+        ];
+
+        for pattern in unix_dangerous {
+            if cmd_lower.contains(pattern) {
+                return Err(AgentError::Other(format!(
+                    "🚫 安全拦截：命令包含危险模式 \"{pattern}\"\n   命令: {cmd}"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ── Shell 选择 ──
+
+/// 获取 Windows 下可用的 Shell，优先 pwsh (PS 7+)，回退 powershell (5.1)。
+/// 结果通过 `OnceLock` 缓存，避免每次命令执行都 spawn 检测进程。
+fn get_windows_shell() -> &'static str {
+    PW_SH_AVAILABLE.get_or_init(|| {
+        std::process::Command::new("pwsh")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    });
+
+    if *PW_SH_AVAILABLE.get().unwrap() {
+        "pwsh"
+    } else {
+        "powershell"
+    }
+}
+
+// ── 编码处理 ──
+
 /// 智能解码命令输出：优先 UTF-8，失败时在 Windows 上回退到 GBK
 fn decode_output(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
 
-    // 优先尝试 UTF-8
+    // 先尝试 UTF-8
     match std::str::from_utf8(bytes) {
-        Ok(s) => {
-            // 检查是否包含替换字符 (U+FFFD)，若有则尝试 GBK
-            if s.contains('\u{FFFD}') && cfg!(target_os = "windows") {
-                let (cow, _encoding, had_errors) = GBK.decode(bytes);
-                if !had_errors {
-                    tracing::trace!("UTF-8 解码存在替换字符，已回退到 GBK 解码");
-                    return cow.into_owned();
-                }
-            }
-            s.to_string()
-        }
+        Ok(s) => s.to_string(),
         Err(_) => {
-            // UTF-8 解码失败，在 Windows 上使用 GBK
+            // UTF-8 解码失败，在 Windows 上使用 GBK 回退
             if cfg!(target_os = "windows") {
                 tracing::trace!("UTF-8 解码失败，回退到 GBK 解码");
                 let (cow, _encoding, had_errors) = GBK.decode(bytes);
