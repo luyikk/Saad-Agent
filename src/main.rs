@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
                     let success = !summary.to_lowercase().contains("error")
                         && !summary.to_lowercase().contains("failed");
                     let preview = if summary.chars().count() > 200 {
-                        format!("{}...", &summary[..200])
+                        format!("{}...", summary.chars().take(200).collect::<String>())
                     } else {
                         summary
                     };
