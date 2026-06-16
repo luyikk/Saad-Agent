@@ -1,7 +1,7 @@
 /// 文件操作工具
 ///
 /// 提供安全的文件读写功能，所有写操作需要用户权限确认。
-/// 内置路径穿越防护，禁止访问工作目录之外的文件。
+/// 内置路径穿越防护，检测到越权访问时弹框让用户确认。
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +12,7 @@ use serde_json::json;
 use tracing;
 
 use crate::error::AgentError;
+use crate::permission;
 
 // ============================================================
 // 路径安全校验
@@ -24,9 +25,13 @@ use crate::error::AgentError;
 /// - 绝对路径也必须在当前工作目录子树内（防止 `/etc/passwd` 这类逃逸）
 /// - 符号链接解析后的真实路径也会被检查
 ///
+/// # 用户交互
+/// - 检测到路径逃逸时，弹出确认对话框让用户选择是否继续
+/// - 用户同意后放行，拒绝则返回错误
+///
 /// # 错误
-/// - 路径不存在时无法 canonicalize（对读操作允许，对写操作需额外处理父目录）
-/// - 路径逃逸到工作目录之外
+/// - 路径不存在时无法 canonicalize
+/// - 用户拒绝了越权访问
 fn resolve_safe_path(requested: &str) -> Result<PathBuf, AgentError> {
     let cwd =
         std::env::current_dir().map_err(|e| AgentError::Other(format!("无法获取当前目录: {e}")))?;
@@ -46,11 +51,12 @@ fn resolve_safe_path(requested: &str) -> Result<PathBuf, AgentError> {
 
     // 安全检查：必须在当前工作目录子树内
     if !resolved.starts_with(&cwd_clean) {
-        return Err(AgentError::Other(format!(
-            "🚫 安全拦截：路径逃逸到工作目录之外\n   请求路径: {requested}\n   解析路径: {}\n   工作目录: {}",
+        let msg = format!(
+            "路径逃逸到工作目录之外\n   请求路径: {requested}\n   解析路径: {}\n   工作目录: {}",
             resolved.display(),
             cwd_clean.display()
-        )));
+        );
+        permission::confirm_cross_directory(&msg)?;
     }
 
     Ok(resolved)
@@ -73,10 +79,11 @@ fn resolve_safe_path_for_write(requested: &str) -> Result<PathBuf, AgentError> {
             .canonicalize()
             .map_err(|e| AgentError::Other(format!("无法解析路径 '{requested}': {e}")))?;
         if !resolved.starts_with(&cwd_clean) {
-            return Err(AgentError::Other(format!(
-                "🚫 安全拦截：路径逃逸到工作目录之外\n   请求路径: {requested}\n   工作目录: {}",
+            let msg = format!(
+                "路径逃逸到工作目录之外\n   请求路径: {requested}\n   工作目录: {}",
                 cwd_clean.display()
-            )));
+            );
+            permission::confirm_cross_directory(&msg)?;
         }
         return Ok(resolved);
     }
@@ -89,10 +96,11 @@ fn resolve_safe_path_for_write(requested: &str) -> Result<PathBuf, AgentError> {
                 // 到达根目录，说明路径完全不存在
                 // 回退：检查 candidate 本身（未经 canonicalize）是否以 cwd_clean 开头
                 if !candidate.starts_with(&cwd_clean) {
-                    return Err(AgentError::Other(format!(
-                        "🚫 安全拦截：路径逃逸到工作目录之外\n   请求路径: {requested}\n   工作目录: {}",
+                    let msg = format!(
+                        "路径逃逸到工作目录之外\n   请求路径: {requested}\n   工作目录: {}",
                         cwd_clean.display()
-                    )));
+                    );
+                    permission::confirm_cross_directory(&msg)?;
                 }
                 return Ok(candidate);
             }
@@ -102,10 +110,11 @@ fn resolve_safe_path_for_write(requested: &str) -> Result<PathBuf, AgentError> {
                         .canonicalize()
                         .map_err(|e| AgentError::Other(format!("无法解析父目录: {e}")))?;
                     if !resolved_parent.starts_with(&cwd_clean) {
-                        return Err(AgentError::Other(format!(
-                            "🚫 安全拦截：路径逃逸到工作目录之外\n   请求路径: {requested}\n   工作目录: {}",
+                        let msg = format!(
+                            "路径逃逸到工作目录之外\n   请求路径: {requested}\n   工作目录: {}",
                             cwd_clean.display()
-                        )));
+                        );
+                        permission::confirm_cross_directory(&msg)?;
                     }
                     // 父目录安全，在原 candidate 基础上拼接剩余部分
                     let remainder = candidate.strip_prefix(parent).unwrap_or(Path::new(""));
@@ -167,7 +176,7 @@ impl Tool for ReadFile {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let max_lines = args.max_lines.unwrap_or(500);
 
-        // 路径安全校验
+        // 路径安全校验（检测到越权会弹框确认）
         let safe_path = resolve_safe_path(&args.path)?;
 
         tracing::trace!("读取文件: {}，最大行数: {max_lines}", safe_path.display());
@@ -255,7 +264,7 @@ impl Tool for WriteFile {
         // 文件写入需要用户确认
         crate::permission::confirm_file_write(&args.path)?;
 
-        // 路径安全校验（对写入操作放宽：允许目标文件不存在）
+        // 路径安全校验（检测到越权会弹框确认）
         let safe_path = resolve_safe_path_for_write(&args.path)?;
 
         // 确保父目录存在

@@ -5,13 +5,17 @@
 /// 在 Windows 上使用 `encoding_rs` 智能处理 GBK/UTF-8 编码转换。
 use std::sync::OnceLock;
 
+use console::style;
 use encoding_rs::GBK;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use regex::Regex;
+use std::collections::HashSet;
 
 use crate::error::AgentError;
+use crate::ui;
 
 /// 缓存的 PowerShell 版本检测结果：`true` 表示 pwsh 可用
 static PW_SH_AVAILABLE: OnceLock<bool> = OnceLock::new();
@@ -60,8 +64,8 @@ impl Tool for RunCmd {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let cmdline = args.command;
 
-        // 安全检查：阻止明显的危险命令
-        check_dangerous_command(&cmdline)?;
+        // 安全检查：检测危险模式，弹框让用户确认
+        confirm_dangerous_command(&cmdline)?;
 
         // 权限检查
         crate::permission::confirm_execution(&cmdline)?;
@@ -110,110 +114,106 @@ impl Tool for RunCmd {
 
 /// 检查命令是否包含已知的危险模式。
 ///
-/// 这不是完整的安全沙箱，而是对最常见破坏性命令的启发式拦截。
-/// 如果命令包含危险模式，直接返回错误，不进入权限确认流程。
-fn check_dangerous_command(cmd: &str) -> Result<(), AgentError> {
-    let cmd_lower = cmd.to_lowercase();
+/// 如果匹配到危险模式，弹出确认对话框让用户选择是否继续执行。
+/// 用户拒绝时返回错误。
+fn confirm_dangerous_command(cmd: &str) -> Result<(), AgentError> {
+    let reason = match detect_dangerous_pattern(cmd) {
+        Some(r) => r,
+        None => return Ok(()),
+    };
 
-    // ── 跨平台危险模式 ──
-    let cross_platform_dangerous: &[&str] = &[
-        // 递归强制删除根目录
-        "rm -rf /",
-        "rm -rf / --no-preserve-root",
-        "rm -r /*",
-        // 覆盖磁盘设备
-        "dd if=",
-        "mkfs.",
-        // Fork 炸弹
-        ":(){ :|:& };:",
-        // curl/wget 管道到 shell（常见攻击向量）
-        "curl ",
-        "wget ",
-    ];
+    ui::print_spacer();
+    println!(
+        "{} {}",
+        style("⚠").yellow().bold(),
+        style("安全警告：检测到潜在危险操作").yellow().bold()
+    );
+    println!("  {}", style(&reason).yellow());
+    println!("  {} {}", style("📋 命令:").dim(), style(cmd).white());
+    ui::print_spacer();
 
-    // curl/wget 管道到 shell 的特殊检测
-    if (cmd_lower.contains("curl") || cmd_lower.contains("wget"))
-        && (cmd_lower.contains("| sh")
-            || cmd_lower.contains("| bash")
-            || cmd_lower.contains("| zsh"))
-    {
-        return Err(AgentError::Other(format!(
-            "🚫 安全拦截：检测到远程脚本管道执行 (curl/wget ... | shell)\n   命令: {cmd}"
-        )));
+    let confirmed = dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
+        .with_prompt("确认执行此命令吗？")
+        .default(false)
+        .interact()
+        .map_err(|e| AgentError::Other(format!("无法读取用户输入: {e}")))?;
+
+    if confirmed {
+        tracing::warn!("用户确认执行危险命令: {cmd}");
+        Ok(())
+    } else {
+        Err(AgentError::Other(format!(
+            "🚫 用户拒绝了危险命令的执行\n   原因: {reason}\n   命令: {cmd}"
+        )))
     }
-
-    for pattern in cross_platform_dangerous {
-        if cmd_lower.contains(pattern) {
-            return Err(AgentError::Other(format!(
-                "🚫 安全拦截：命令包含危险模式 \"{pattern}\"\n   命令: {cmd}"
-            )));
-        }
-    }
-
-    // ── Windows 特有危险模式 ──
-    if cfg!(target_os = "windows") {
-        let windows_dangerous: &[&str] = &[
-            // 磁盘格式化
-            "format ",
-            "format c:",
-            "format d:",
-            // 递归删除系统盘
-            "del /f /s c:\\",
-            "del /f /s d:\\",
-            "rd /s /q c:\\",
-            "rd /s /q d:\\",
-            // PowerShell 删除根目录
-            "remove-item -path c:\\ -recurse",
-            "remove-item -path d:\\ -recurse",
-            "remove-item c:\\ -recurse",
-            "remove-item d:\\ -recurse",
-            "ri c:\\ -recurse",
-            "ri d:\\ -recurse",
-            // 清除事件日志/磁盘
-            "clear-disk",
-            "format-volume",
-            // 禁用安全功能
-            "set-executionpolicy unrestricted",
-            "disable-computerrestore",
-            // 删除注册表关键项
-            "remove-item hklm:",
-            "remove-item hkcu:",
-            "del hklm:",
-        ];
-
-        for pattern in windows_dangerous {
-            if cmd_lower.contains(pattern) {
-                return Err(AgentError::Other(format!(
-                    "🚫 安全拦截：命令包含危险模式 \"{pattern}\"\n   命令: {cmd}"
-                )));
-            }
-        }
-    }
-
-    // ── Unix 特有危险模式 ──
-    if !cfg!(target_os = "windows") {
-        let unix_dangerous: &[&str] = &[
-            "> /dev/sda",
-            "> /dev/hda",
-            "> /dev/nvme",
-            "mkfs.",
-            "chmod 777 /",
-            "chown -r root:root /",
-            ":(){ :|:& };:",
-        ];
-
-        for pattern in unix_dangerous {
-            if cmd_lower.contains(pattern) {
-                return Err(AgentError::Other(format!(
-                    "🚫 安全拦截：命令包含危险模式 \"{pattern}\"\n   命令: {cmd}"
-                )));
-            }
-        }
-    }
-
-    Ok(())
 }
 
+
+
+/// 检测命令是否匹配危险模式，返回危险原因描述
+fn detect_dangerous_pattern(cmd: &str) -> Option<String> {
+    let cmd_trimmed = cmd.trim();
+    if cmd_trimmed.is_empty() {
+        return None;
+    }
+
+    // 1. 拦截 Shell 注入与命令链接符（防止拼接恶意命令）
+    let injection_patterns = [
+        r"[;&|`]",              // 拦截 ; & | ` 等命令连接符或反引号
+        r"\$\(",                // 拦截命令替换 $(...)
+        r">\s*/",               // 拦截重定向到绝对路径
+    ];
+    for pattern in &injection_patterns {
+        if Regex::new(pattern).unwrap().is_match(cmd_trimmed) {
+            return Some(format!("检测到潜在的命令注入或重定向操作 — 匹配模式: \"{}\"", pattern));
+        }
+    }
+
+    // 2. 跨平台高危模式（使用正则匹配参数顺序和空格）
+    let cross_platform_patterns: &[(&str, &str)] = &[
+        (r"\brm\s+.*-r.*-f.*\s+/\b", "递归强制删除根目录 (rm -rf /)"),
+        (r"\brm\s+.*--no-preserve-root\b", "递归删除根目录（绕过保护）"),
+        (r">\s*/dev/sd[a-z]", "覆写磁盘设备"),
+        (r"\bmkfs\.", "格式化文件系统"),
+        (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", "Fork 炸弹"),
+    ];
+    for (pattern, desc) in cross_platform_patterns {
+        if Regex::new(pattern).unwrap().is_match(cmd_trimmed) {
+            return Some(format!("{} — 匹配模式: \"{}\"", desc, pattern));
+        }
+    }
+
+    // 3. 提取基础命令并进行白名单校验（防御核心）
+    let base_cmd = cmd_trimmed.split_whitespace().next().unwrap_or("");
+    // 提取命令名称，处理 /usr/bin/rm 这种绝对路径的情况
+    let cmd_name = base_cmd.split('/').last().unwrap_or("");
+
+    // 定义安全白名单（根据实际需求扩展）
+    let allowed_commands: HashSet<&str> = [
+        "ls", "pwd", "cat", "grep", "head", "tail", "ps", "df", "du", "whoami",
+        "date", "uptime", "free", "top", "netstat", "ss", "ip", "hostname", "echo",
+    ].iter().cloned().collect();
+
+    if !cmd_name.is_empty() && !allowed_commands.contains(cmd_name) {
+        return Some(format!("命令 \"{}\" 不在允许执行的白名单中", cmd_name));
+    }
+
+    // 4. 平台特有检测（示例：Unix 权限修改）
+    #[cfg(not(target_os = "windows"))]
+    {
+        let unix_patterns: &[(&str, &str)] = &[
+            (r"\bchmod\s+777\s+/\b", "修改根目录权限为 777"),
+            (r"\bchown\s+-R\s+root:root\s+/\b", "递归修改根目录所有者为 root"),
+        ];
+        for (pattern, desc) in unix_patterns {
+            if Regex::new(pattern).unwrap().is_match(cmd_trimmed) {
+                return Some(format!("{} — 匹配模式: \"{}\"", desc, pattern));
+            }
+        }
+    }
+
+    None
+}
 // ── Shell 选择 ──
 
 /// 获取 Windows 下可用的 Shell，优先 pwsh (PS 7+)，回退 powershell (5.1)。
