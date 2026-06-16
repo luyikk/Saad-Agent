@@ -181,12 +181,14 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
         .agent(&model_name)
         .preamble(&preamble)
         .name("Saad")
-        .default_max_turns(config::DEFAULT_MAX_TURNS)
+        .default_max_turns(config::get_max_turns())
         .temperature(config::DEFAULT_TEMPERATURE)
         .max_tokens(effort.max_tokens() as u64)
         .tool(tool::cmd::RunCmd)
         .tool(tool::fs::ReadFile)
         .tool(tool::fs::WriteFile)
+        .tool(tool::fs::EditFile)
+        .tool(tool::fs::GetFileLines)
         .build()
 }
 

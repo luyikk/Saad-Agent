@@ -5,8 +5,16 @@ use std::sync::atomic::{AtomicU8, Ordering};
 /// 默认的 AI 模型名称
 pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
-/// 最大对话轮次
+/// 最大对话轮次（默认值）
 pub const DEFAULT_MAX_TURNS: usize = 100;
+
+/// 获取最大对话轮次（优先从环境变量 `SAAD_MAX_TURNS` 读取）
+pub fn get_max_turns() -> usize {
+    std::env::var("SAAD_MAX_TURNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAX_TURNS)
+}
 
 /// 温度参数
 pub const DEFAULT_TEMPERATURE: f64 = 0.5;

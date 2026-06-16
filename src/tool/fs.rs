@@ -137,8 +137,12 @@ fn resolve_safe_path_for_write(requested: &str) -> Result<PathBuf, AgentError> {
 pub struct ReadFileArgs {
     /// 要读取的文件路径
     pub path: String,
-    /// 可选：读取的最大行数（默认 500）
+    /// 可选：从第几行开始读（1-based），默认从第 1 行
+    pub start_line: Option<usize>,
+    /// 可选：读取的最大行数，默认 500
     pub max_lines: Option<usize>,
+    /// 可选：读取文件末尾的 N 行（设置后将忽略 start_line）
+    pub tail_lines: Option<usize>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -154,7 +158,7 @@ impl Tool for ReadFile {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "ReadFile".to_string(),
-            description: "读取指定路径的文件内容。支持文本文件，返回带行号的内容。".to_string(),
+            description: "读取指定路径的文件内容，返回带行号的内容。支持从指定行开始、限制行数、从末尾向上读取。".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -162,9 +166,17 @@ impl Tool for ReadFile {
                         "type": "string",
                         "description": "要读取的文件完整路径"
                     },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "从第几行开始读取（1-based）。不设置则从第 1 行开始。与 tail_lines 互斥"
+                    },
                     "max_lines": {
                         "type": "integer",
                         "description": "读取的最大行数，默认 500"
+                    },
+                    "tail_lines": {
+                        "type": "integer",
+                        "description": "读取文件末尾的最后 N 行。设置后将忽略 start_line，从末尾向上取 N 行"
                     }
                 },
                 "required": ["path"],
@@ -176,10 +188,8 @@ impl Tool for ReadFile {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let max_lines = args.max_lines.unwrap_or(500);
 
-        // 路径安全校验（检测到越权会弹框确认）
+        // 路径安全校验
         let safe_path = resolve_safe_path(&args.path)?;
-
-        tracing::trace!("读取文件: {}，最大行数: {max_lines}", safe_path.display());
 
         let content = tokio::fs::read_to_string(&safe_path).await.map_err(|e| {
             AgentError::Other(format!("无法读取文件 '{}': {e}", safe_path.display()))
@@ -188,27 +198,49 @@ impl Tool for ReadFile {
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
 
-        // 截断到 max_lines
-        let display_lines: Vec<&str> = if lines.len() > max_lines {
-            lines.into_iter().take(max_lines).collect()
+        // 确定读取范围
+        let (display_lines, line_offset, header) = if let Some(tail) = args.tail_lines {
+            // 从末尾向上取 N 行
+            let take = tail.min(max_lines);
+            let start = total.saturating_sub(take);
+            let slice = &lines[start..];
+            (
+                slice.to_vec(),
+                start,
+                format!("…（末尾 {take} 行，共 {total} 行）"),
+            )
         } else {
-            lines
+            // 从 start_line 开始向后取
+            let start_idx = args.start_line.map_or(0, |s| s.saturating_sub(1));
+            let start_idx = start_idx.min(total);
+            let slice = &lines[start_idx..];
+            let taken: Vec<&str> = slice.iter().take(max_lines).copied().collect();
+            let shown = taken.len();
+            let header = if start_idx + shown < total {
+                format!(
+                    "…（第 {}-{} 行，共 {total} 行）",
+                    start_idx + 1,
+                    start_idx + shown,
+                )
+            } else if start_idx > 0 {
+                format!("…（第 {}-{} 行，共 {total} 行）", start_idx + 1, total)
+            } else {
+                String::new()
+            };
+            (taken, start_idx, header)
         };
 
         // 带行号输出
         let numbered: Vec<String> = display_lines
             .iter()
             .enumerate()
-            .map(|(i, line)| format!("{:>6} | {}", i + 1, line))
+            .map(|(i, line)| format!("{:>6} | {}", line_offset + i + 1, line))
             .collect();
 
         let mut result = numbered.join("\n");
 
-        if total > max_lines {
-            let _ = write!(
-                result,
-                "\n\n... (已截断，共 {total} 行，只显示前 {max_lines} 行)"
-            );
+        if !header.is_empty() {
+            let _ = write!(result, "\n\n{header}");
         }
 
         Ok(result)
@@ -293,5 +325,193 @@ impl Tool for WriteFile {
             safe_path.display(),
             args.content.len()
         ))
+    }
+}
+
+// ============================================================
+// EditFile
+// ============================================================
+
+#[derive(Deserialize, Debug)]
+pub struct EditFileArgs {
+    /// 要编辑的文件路径
+    pub path: String,
+    /// 要替换的原始文本（必须在文件中唯一存在）
+    pub old_string: String,
+    /// 替换后的新文本
+    pub new_string: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct EditFile;
+
+impl Tool for EditFile {
+    const NAME: &'static str = "EditFile";
+
+    type Error = AgentError;
+    type Args = EditFileArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "EditFile".to_string(),
+            description: r#"精确编辑文件：在文件中查找 `old_string` 并替换为 `new_string`。
+【⚠️ 关键规则】
+- `old_string` 必须与文件中的内容完全一致（包括空格、缩进、换行），且在文件中只能出现一次
+- `old_string` 必须包含足够的上下文（前后各 2-3 行）以确保唯一匹配
+- 如果要删除内容，将 `new_string` 设为空字符串 ""
+- 不要传整个文件内容，只传需要修改的最小片段"#
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "要编辑的文件完整路径"
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "要替换的原始文本片段，必须与文件中对应内容完全一致且在文件中唯一出现。请包含足够的上下文行以确保唯一性。"
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "替换后的新文本内容"
+                    }
+                },
+                "required": ["path", "old_string", "new_string"],
+            }),
+        }
+    }
+
+    #[tracing::instrument(level = "trace", ret)]
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        // 文件编辑需要用户确认
+        crate::permission::confirm_file_write(&args.path)?;
+
+        // 路径安全校验
+        let safe_path = resolve_safe_path(&args.path)?;
+
+        tracing::trace!(
+            "编辑文件: {}，old: {} 字节，new: {} 字节",
+            safe_path.display(),
+            args.old_string.len(),
+            args.new_string.len()
+        );
+
+        let content = tokio::fs::read_to_string(&safe_path).await.map_err(|e| {
+            AgentError::Other(format!("无法读取文件 '{}': {e}", safe_path.display()))
+        })?;
+
+        // 查找 old_string 并验证唯一性
+        let matches: Vec<usize> = content
+            .match_indices(&args.old_string)
+            .map(|(i, _)| i)
+            .collect();
+
+        match matches.len() {
+            0 => {
+                return Err(AgentError::Other(format!(
+                    "❌ 未在文件 '{}' 中找到匹配的 old_string。\n\
+                     提示:\n  \
+                     - 检查文本是否完全一致（包括空白字符、缩进）\n  \
+                     - old_string 必须包含足够的上下文以确保唯一性\n  \
+                     - 先用 ReadFile 查看文件内容确认要修改的部分",
+                    safe_path.display()
+                )));
+            }
+            1 => {} // 唯一匹配，继续
+            n => {
+                // 展示冲突位置以帮助 AI 修正
+                let mut hints = Vec::new();
+                for (i, &pos) in matches.iter().take(5).enumerate() {
+                    let start = pos.saturating_sub(40);
+                    let end = (pos + args.old_string.len() + 40).min(content.len());
+                    let snippet = &content[start..end];
+                    hints.push(format!("  [{}] ...{}...", i + 1, snippet));
+                }
+                return Err(AgentError::Other(format!(
+                    "❌ old_string 在文件中出现了 {n} 次（必须唯一）。\n\
+                     前 5 处匹配位置:\n{}\n\
+                     提示: 请包含更多上下文行（前后 2-3 行）以确保 old_string 唯一匹配。",
+                    hints.join("\n")
+                )));
+            }
+        }
+
+        // 执行替换
+        let new_content = content.replacen(&args.old_string, &args.new_string, 1);
+
+        // 写入文件
+        tokio::fs::write(&safe_path, &new_content)
+            .await
+            .map_err(|e| {
+                AgentError::Other(format!("无法写入文件 '{}': {e}", safe_path.display()))
+            })?;
+
+        let changed = (args.new_string.len() as i64) - (args.old_string.len() as i64);
+        let summary = if changed >= 0 {
+            format!("+{} 字节", changed)
+        } else {
+            format!("{} 字节", changed)
+        };
+
+        Ok(format!(
+            "✅ 已成功编辑文件: {}\n   替换: {} 字节 → {} 字节 ({})",
+            safe_path.display(),
+            args.old_string.len(),
+            args.new_string.len(),
+            summary
+        ))
+    }
+}
+
+// ============================================================
+// GetFileLines
+// ============================================================
+
+#[derive(Deserialize, Debug)]
+pub struct GetFileLinesArgs {
+    /// 文件路径
+    pub path: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct GetFileLines;
+
+impl Tool for GetFileLines {
+    const NAME: &'static str = "GetFileLines";
+
+    type Error = AgentError;
+    type Args = GetFileLinesArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "GetFileLines".to_string(),
+            description: "获取文本文件的总行数。用于在读取大文件前了解文件规模，方便决定 ReadFile 的 max_lines 参数。".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "要查询的文件完整路径"
+                    }
+                },
+                "required": ["path"],
+            }),
+        }
+    }
+
+    #[tracing::instrument(level = "trace", ret)]
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let safe_path = resolve_safe_path(&args.path)?;
+
+        let content = tokio::fs::read_to_string(&safe_path).await.map_err(|e| {
+            AgentError::Other(format!("无法读取文件 '{}': {e}", safe_path.display()))
+        })?;
+
+        let total = content.lines().count();
+
+        Ok(format!("文件: {}\n总行数: {total}", safe_path.display(),))
     }
 }
