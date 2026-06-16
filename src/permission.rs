@@ -82,10 +82,8 @@ pub async fn confirm_execution(cmdline: &str) -> Result<(), CmdError> {
 
     // 使用 dialoguer 交互选择
     match crate::ui::select_permission("即将执行命令:", cmdline) {
-        Some(selection) => {
-            handle_selection(selection, &format!("命令执行: {cmdline}"))
-                .map_err(CmdError::StringError)
-        }
+        Some(selection) => handle_selection(selection, &format!("命令执行: {cmdline}"))
+            .map_err(CmdError::StringError),
         None => Err(CmdError::StringError("权限选择已取消".to_string())),
     }
 }
@@ -100,8 +98,7 @@ pub async fn confirm_file_write(path: &str) -> Result<(), FsError> {
 
     match crate::ui::select_permission("即将写入文件:", path) {
         Some(selection) => {
-            handle_selection(selection, &format!("文件写入: {path}"))
-                .map_err(FsError::Other)
+            handle_selection(selection, &format!("文件写入: {path}")).map_err(FsError::Other)
         }
         None => Err(FsError::Other("权限选择已取消".to_string())),
     }

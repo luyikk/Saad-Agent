@@ -133,9 +133,7 @@ fn message_preview(msg: &Message, max_chars: usize) -> String {
             .filter_map(|c| match c {
                 AssistantContent::Text(t) => Some(t.text.clone()),
                 AssistantContent::Reasoning(r) => Some(r.display_text()),
-                AssistantContent::ToolCall(tc) => {
-                    Some(format!("[ToolCall: {}]", tc.function.name))
-                }
+                AssistantContent::ToolCall(tc) => Some(format!("[ToolCall: {}]", tc.function.name)),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -166,11 +164,7 @@ fn message_role_name(msg: &Message) -> &'static str {
 // ============================================================
 
 /// 处理内置斜杠命令。返回 `Some(true)` 表示应退出程序。
-async fn handle_command(
-    cmd: &str,
-    history: &mut Vec<Message>,
-    max_history: usize,
-) -> Option<bool> {
+async fn handle_command(cmd: &str, history: &mut Vec<Message>, max_history: usize) -> Option<bool> {
     match cmd.to_lowercase().as_str() {
         "/exit" | "/quit" => {
             if !history.is_empty() {
@@ -194,10 +188,9 @@ async fn handle_command(
                 ui::print_warning("对话历史为空，无需保存");
             } else {
                 match save_history(history) {
-                    Ok(()) => ui::print_success(&format!(
-                        "对话历史已保存 ({} 条消息)",
-                        history.len()
-                    )),
+                    Ok(()) => {
+                        ui::print_success(&format!("对话历史已保存 ({} 条消息)", history.len()))
+                    }
                     Err(e) => ui::print_error(&format!("保存失败: {}", e)),
                 }
             }
@@ -299,9 +292,26 @@ async fn main() -> Result<()> {
     let model_name = config::get_model_name();
     tracing::info!("使用模型: {}", model_name);
 
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "未知".to_string());
+
+    let preamble = format!(
+        r#"你是一个专业的程序员助手，可以执行命令和读写文件来帮助用户完成任务。
+
+【当前工作目录】
+{}
+
+【注意事项】
+- 所有相对路径都基于上述工作目录
+- 在执行命令或读写文件时，优先使用绝对路径
+- 如果不确定某个文件的位置，先用 Get-ChildItem / ls 探索目录结构"#,
+        cwd
+    );
+
     let agent = client
         .agent(&model_name)
-        .preamble("你是一个专业的程序员助手，可以执行命令和读写文件来帮助用户完成任务。")
+        .preamble(&preamble)
         .name("Saad")
         .default_max_turns(config::DEFAULT_MAX_TURNS)
         .temperature(config::DEFAULT_TEMPERATURE)
@@ -404,9 +414,7 @@ async fn main() -> Result<()> {
                 ui::s_dim("📊"),
                 ui::s_dim(&format!(
                     "Token: 输入 {} | 输出 {} | 总计 {}",
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    usage.total_tokens
+                    usage.input_tokens, usage.output_tokens, usage.total_tokens
                 ))
             );
         }
@@ -414,5 +422,5 @@ async fn main() -> Result<()> {
         println!();
     }
 
-    Ok(())
+    std::process::exit(0);
 }

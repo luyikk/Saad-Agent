@@ -1,11 +1,7 @@
 /// 终端 UI 工具模块
 ///
 /// 封装 console / dialoguer / indicatif，提供统一的美化终端输出。
-use console::{style, Term};
-use dialoguer::{theme::ColorfulTheme, Select};
-use indicatif::{ProgressBar, ProgressStyle};
-
-// ── 颜色常量 ──
+use console::{style, Alignment, Style, Term};
 
 // ── 快捷样式 ──
 
@@ -54,51 +50,67 @@ pub fn print_spacer() {
 
 // ── 欢迎 / 帮助 / 退出 ──
 
+/// 打印现代化欢迎卡片
+///
+/// 使用 `console::pad_str` 而非标准库 `format!("{:^w$}")`，
+/// 以正确处理中文/emoji 等双宽字符的居中排版。
 pub fn print_welcome(history_count: usize) {
     let term = Term::stdout();
     let width = term.size().1 as usize;
-    let w = width.clamp(30, 60);
 
-    let border_top = format!("\u{256d}{:\u{2500}^w$}\u{256e}", "", w = w - 2);
-    let border_bot = format!("\u{2570}{:\u{2500}^w$}\u{256f}", "", w = w - 2);
+    // 卡片宽度：最小 46 以容纳中文内容，最大 74 保持精致
+    let card_w = width.clamp(46, 74);
+    let inner = card_w.saturating_sub(2); // 扣除 │ 边框
+
+    // CJK / emoji 宽度感知的居中辅助闭包
+    let center =
+        |s: &str| -> String { console::pad_str(s, inner, Alignment::Center, None).to_string() };
+
+    // 预制 Style
+    let accent = Style::new().cyan();
+    let bold = Style::new().cyan().bold();
+    let dim = Style::new().dim();
+
+    // 带边框的行
+    let row = |content: &str, s: &Style| -> String {
+        format!(
+            "{}{}{}",
+            s.apply_to("│"),
+            s.apply_to(content),
+            s.apply_to("│")
+        )
+    };
+
+    let top_border = format!("╭{}╮", "─".repeat(inner));
+    let bot_border = format!("╰{}╯", "─".repeat(inner));
+    let spacer_row = format!("│{}│", " ".repeat(inner));
 
     println!();
-    println!("{}", style(border_top).cyan());
-    println!(
-        "{}",
-        style(format!(
-            "\u{2502}{:^w$}\u{2502}",
-            "Saad Agent — AI 编程助手",
-            w = w - 2
-        ))
-        .cyan()
-        .bold()
-    );
-    println!(
-        "{}",
-        style(format!(
-            "\u{2502}{:^w$}\u{2502}",
-            "输入你的需求，我来帮你完成！",
-            w = w - 2
-        ))
-        .cyan()
-    );
-    println!(
-        "{}",
-        style(format!(
-            "\u{2502}{:^w$}\u{2502}",
-            "/help 查看命令",
-            w = w - 2
-        ))
-        .dim()
-    );
-    println!("{}", style(border_bot).cyan());
+    println!("{}", accent.apply_to(&top_border));
 
+    // 标题区
+    println!("{}", accent.apply_to(&spacer_row));
+    println!("{}", row(&center("🚀  Saad Agent"), &bold));
+    println!("{}", row(&center("AI 编程助手 · 智能伙伴"), &accent));
+
+    // 描述区
+    println!("{}", accent.apply_to(&spacer_row));
+    println!("{}", row(&center("输入你的需求，我来帮你完成！"), &accent));
+
+    // 快捷键区
+    println!("{}", accent.apply_to(&spacer_row));
+    println!("{}", row(&center("/help 命令  ·  /exit 退出"), &dim));
+
+    // 闭合
+    println!("{}", accent.apply_to(&spacer_row));
+    println!("{}", accent.apply_to(&bot_border));
+
+    // 历史提示
     if history_count > 0 {
         println!(
-            "  {} 已加载 {} 条历史消息",
-            s_dim("\u{1f4c2}"),
-            style(history_count).yellow()
+            "  {} 已加载 {} 条历史消息 — 继续对话",
+            s_dim("📂"),
+            style(history_count).yellow().bold()
         );
     }
     println!();
@@ -130,38 +142,35 @@ pub fn print_help() {
     }
 
     print_spacer();
-    println!(
-        "  {}  Ctrl+C 优雅退出（自动保存历史）",
-        s_dim("\u{1f4a1}")
-    );
+    println!("  {}  Ctrl+C 优雅退出（自动保存历史）", s_dim("💡"));
     print_spacer();
 }
 
 pub fn print_goodbye(saved: bool) {
     print_spacer();
     if saved {
-        println!("{} 对话历史已自动保存", s_dim("\u{1f4be}"));
+        println!("{} 对话历史已自动保存", s_dim("💾"));
     }
-    println!("{} 再见！", style("\u{1f44b}").cyan());
+    println!("{} 再见！", style("👋").cyan());
     print_spacer();
 }
 
 // ── 状态消息 ──
 
 pub fn print_info(msg: &str) {
-    println!("{} {}", s_dim("\u{2117}"), msg);
+    println!("{} {}", s_dim("℗"), msg);
 }
 
 pub fn print_success(msg: &str) {
-    println!("{} {}", s_success("\u{2705}"), msg);
+    println!("{} {}", s_success("✅"), msg);
 }
 
 pub fn print_warning(msg: &str) {
-    println!("{} {}", s_warn("\u{26a0}\u{fe0f}"), msg);
+    println!("{} {}", s_warn("⚠️"), msg);
 }
 
 pub fn print_error(msg: &str) {
-    println!("{} {}", s_error("\u{274c}"), msg);
+    println!("{} {}", s_error("❌"), msg);
 }
 
 // ── 权限弹窗（基于 dialoguer::Select） ──
@@ -169,13 +178,12 @@ pub fn print_error(msg: &str) {
 pub fn select_permission(action_desc: &str, detail: &str) -> Option<usize> {
     print_spacer();
 
-    // 打印警告描述
     println!(
         "{} {}",
-        style("\u{26a0}").yellow().bold(),
+        style("⚠").yellow().bold(),
         style(action_desc).yellow()
     );
-    println!("  {} {}", s_dim("\u{1f527}"), s_dim(detail));
+    println!("  {} {}", s_dim("🔧"), s_dim(detail));
     print_spacer();
 
     let items = &[
@@ -185,7 +193,7 @@ pub fn select_permission(action_desc: &str, detail: &str) -> Option<usize> {
         "拒绝",
     ];
 
-    let selection = Select::with_theme(&ColorfulTheme::default())
+    let selection = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
         .with_prompt("请选择操作")
         .items(items)
         .default(0)
@@ -198,18 +206,14 @@ pub fn select_permission(action_desc: &str, detail: &str) -> Option<usize> {
 
 // ── Spinner（基于 indicatif） ──
 
-pub fn new_spinner(msg: &str) -> ProgressBar {
-    let pb = ProgressBar::new_spinner();
+pub fn new_spinner(msg: &str) -> indicatif::ProgressBar {
+    let pb = indicatif::ProgressBar::new_spinner();
     pb.set_style(
-        ProgressStyle::with_template("{spinner:.cyan} {msg}")
+        indicatif::ProgressStyle::with_template("{spinner:.cyan} {msg}")
             .unwrap()
-            .tick_strings(&[
-                "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}",
-                "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280f}",
-            ]),
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
     );
     pb.set_message(msg.to_string());
     pb.enable_steady_tick(std::time::Duration::from_millis(80));
     pb
 }
-
