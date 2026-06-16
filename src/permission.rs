@@ -1,12 +1,12 @@
-﻿/// 权限管理系统
+/// 权限管理系统
 ///
-/// 控制 AI Agent 执行命令时的用户授权策略。
+/// 控制 AI Agent 执行命令和文件操作时的用户授权策略。
 /// 支持四种级别：每次询问、会话内全部允许、永久允许、拒绝。
-
 use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::io::AsyncBufReadExt;
 
 use crate::tool::cmd::CmdError;
+use crate::tool::fs::FsError;
 
 /// 权限级别：每次执行都询问用户
 pub const PERM_PROMPT: u8 = 0;
@@ -37,22 +37,12 @@ fn save_permanent_permission() {
     let _ = std::fs::write(&path, "allow_all");
 }
 
-/// 询问用户是否允许执行命令
-///
-/// 根据当前权限级别决定是否需要交互：
-/// - `PERM_SESSION_ALLOW_ALL` / `PERM_PERMANENT_ALLOW_ALL` → 自动允许
-/// - `PERM_PROMPT` → 显示交互界面让用户选择
-pub async fn confirm_execution(cmdline: &str) -> Result<(), CmdError> {
-    let level = PERMISSION_LEVEL.load(Ordering::Relaxed);
-    match level {
-        PERM_SESSION_ALLOW_ALL | PERM_PERMANENT_ALLOW_ALL => return Ok(()),
-        _ => {}
-    }
-
+/// 显示权限选择菜单并获取用户选择
+async fn prompt_user(action_desc: &str, detail: &str) -> Result<char, std::io::Error> {
     println!();
     println!("╔══════════════════════════════════════════════════╗");
-    println!("║  ⚠️  即将执行命令:                          ║");
-    println!("║     🔧 {cmdline}",);
+    println!("║  ⚠️  {action_desc}",);
+    println!("║     🔧 {detail}",);
     println!("╠══════════════════════════════════════════════════╣");
     println!("║  [y] 允许本次执行                             ║");
     println!("║  [a] 本次会话全部允许                         ║");
@@ -65,17 +55,26 @@ pub async fn confirm_execution(cmdline: &str) -> Result<(), CmdError> {
     let mut confirmation = String::new();
     tokio::io::BufReader::new(tokio::io::stdin())
         .read_line(&mut confirmation)
-        .await
-        .map_err(|e| CmdError::StdError(e))?;
+        .await?;
 
-    match confirmation.trim().to_lowercase().as_str() {
-        "y" | "yes" => Ok(()),
-        "a" => {
+    Ok(confirmation
+        .trim()
+        .to_lowercase()
+        .chars()
+        .next()
+        .unwrap_or('n'))
+}
+
+/// 处理用户选择结果
+fn handle_choice(choice: char, action_desc: &str) -> Result<(), String> {
+    match choice {
+        'y' => Ok(()),
+        'a' => {
             PERMISSION_LEVEL.store(PERM_SESSION_ALLOW_ALL, Ordering::Relaxed);
-            println!("✅ 本次会话中所有命令将自动允许执行。");
+            println!("✅ 本次会话中所有操作将自动允许执行。");
             Ok(())
         }
-        "p" => {
+        'p' => {
             PERMISSION_LEVEL.store(PERM_PERMANENT_ALLOW_ALL, Ordering::Relaxed);
             save_permanent_permission();
             println!(
@@ -84,8 +83,42 @@ pub async fn confirm_execution(cmdline: &str) -> Result<(), CmdError> {
             );
             Ok(())
         }
-        _ => Err(CmdError::StringError(format!(
-            "用户拒绝了命令执行: {cmdline}"
-        ))),
+        _ => Err(format!("用户拒绝了操作: {action_desc}")),
+    }
+}
+
+/// 询问用户是否允许执行命令
+///
+/// 根据当前权限级别决定是否需要交互：
+/// - `PERM_SESSION_ALLOW_ALL` / `PERM_PERMANENT_ALLOW_ALL` → 自动允许
+/// - `PERM_PROMPT` → 显示交互界面让用户选择
+pub async fn confirm_execution(cmdline: &str) -> Result<(), CmdError> {
+    let level = PERMISSION_LEVEL.load(Ordering::Relaxed);
+    match level {
+        PERM_SESSION_ALLOW_ALL | PERM_PERMANENT_ALLOW_ALL => return Ok(()),
+        _ => {}
+    }
+
+    match prompt_user("即将执行命令:", cmdline).await {
+        Ok(choice) => {
+            handle_choice(choice, &format!("命令执行: {cmdline}")).map_err(CmdError::StringError)
+        }
+        Err(e) => Err(CmdError::StdError(e)),
+    }
+}
+
+/// 询问用户是否允许写入文件
+pub async fn confirm_file_write(path: &str) -> Result<(), FsError> {
+    let level = PERMISSION_LEVEL.load(Ordering::Relaxed);
+    match level {
+        PERM_SESSION_ALLOW_ALL | PERM_PERMANENT_ALLOW_ALL => return Ok(()),
+        _ => {}
+    }
+
+    match prompt_user("即将写入文件:", path).await {
+        Ok(choice) => {
+            handle_choice(choice, &format!("文件写入: {path}")).map_err(|e| FsError::Other(e))
+        }
+        Err(e) => Err(FsError::Io(e)),
     }
 }
