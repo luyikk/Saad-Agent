@@ -33,6 +33,23 @@ pub fn s_cmd(s: &str) -> String {
     style(s).cyan().bold().to_string()
 }
 
+// ── 格式化 ──
+
+/// 将 token 数量格式化为人类可读的 k/m 单位
+///
+/// - >= 1_000_000 → "1.23m"
+/// - >= 1_000     → "1.23k"
+/// - 否则保留原值
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.2}m", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.2}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 // ── 布局 ──
 
 /// 获取终端宽度
@@ -225,13 +242,23 @@ pub fn new_spinner(msg: &str) -> indicatif::ProgressBar {
 
 /// AI 流式响应的终端渲染器。
 ///
-/// 封装"深度思考 → 回答 → 统计"三阶段的状态机，
-/// 利用 `console::Term` 提供专业的终端渲染效果。
+/// 对标 Claude Code CLI 的阶段展示效果，支持：
+/// - 🧠 深度思考（Thinking/Reasoning 流式输出）
+/// - 🔧 工具调用（展示工具名 + 参数摘要）
+/// - 📥 工具结果（展示返回内容预览）
+/// - 💬 回答（最终文本流式输出）
+/// - 📊 Token 统计
 pub struct StreamDisplay {
     term: Term,
     state: StreamPhase,
     /// 分隔线宽度（取终端宽度与 80 的较小值）
     line_w: usize,
+    /// 工具调用计数器（用于编号 `Tool #1`）
+    tool_call_count: u32,
+    /// 当前工具调用总数（来自 CompletionCall）
+    total_tool_calls: u32,
+    /// 累积每个 CompletionCall 的 token 用量
+    completion_calls: Vec<(u32, Usage)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +267,10 @@ enum StreamPhase {
     Idle,
     /// 正在输出推理链（DeepSeek-R1 等思维链模型）
     Reasoning,
+    /// 正在输出工具调用参数（ToolCallDelta 流）
+    ToolCallDelta,
+    /// 工具调用已确认
+    ToolCall,
     /// 正在输出最终回答
     Answer,
 }
@@ -252,7 +283,23 @@ impl StreamDisplay {
             term: Term::stdout(),
             state: StreamPhase::Idle,
             line_w: width.min(80),
+            tool_call_count: 0,
+            total_tool_calls: 0,
+            completion_calls: Vec::new(),
         }
+    }
+
+    // ── 内部：阶段切换 ──
+
+    /// 阶段切换前的收尾
+    fn finish_phase(&mut self) -> io::Result<()> {
+        match self.state {
+            StreamPhase::Answer | StreamPhase::ToolCallDelta | StreamPhase::ToolCall => {
+                writeln!(self.term)?
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// 打印推理链阶段的区块头部
@@ -260,12 +307,9 @@ impl StreamDisplay {
         if self.state == StreamPhase::Reasoning {
             return Ok(());
         }
-        // 如果之前正在输出回答，先补一个换行
-        if self.state == StreamPhase::Answer {
-            writeln!(self.term)?;
-        }
+        self.finish_phase()?;
         writeln!(self.term)?;
-        self.print_phase_header("🧠", "深度思考")?;
+        self.phase_header("🧠", "深度思考")?;
         self.state = StreamPhase::Reasoning;
         Ok(())
     }
@@ -275,17 +319,15 @@ impl StreamDisplay {
         if self.state == StreamPhase::Answer {
             return Ok(());
         }
-        if self.state == StreamPhase::Reasoning {
-            writeln!(self.term)?;
-        }
+        self.finish_phase()?;
         writeln!(self.term)?;
-        self.print_phase_header("💬", "回答")?;
+        self.phase_header("💬", "回答")?;
         self.state = StreamPhase::Answer;
         Ok(())
     }
 
     /// 打印阶段头部：`🧠 深度思考 ──────────────────────`
-    fn print_phase_header(&mut self, icon: &str, label: &str) -> io::Result<()> {
+    fn phase_header(&mut self, icon: &str, label: &str) -> io::Result<()> {
         let fill = self.line_w.saturating_sub(label.len() + 4); // icon + 空格 + label + 空格
         writeln!(
             self.term,
@@ -296,10 +338,66 @@ impl StreamDisplay {
         )
     }
 
+    /// 打印工具调用信息行
+    fn print_tool_call(&mut self, name: &str, args_preview: &str) -> io::Result<()> {
+        self.finish_phase()?;
+        self.tool_call_count += 1;
+        let icon = style("⏺").cyan();
+        let counter = if self.total_tool_calls > 0 {
+            format!("[{}/{}]", self.tool_call_count, self.total_tool_calls)
+        } else {
+            format!("#{}", self.tool_call_count)
+        };
+        writeln!(
+            self.term,
+            "{} {} {}",
+            icon,
+            style(&counter).cyan().dim(),
+            style(name).cyan().bold()
+        )?;
+        if !args_preview.is_empty() {
+            writeln!(
+                self.term,
+                "  {} {}",
+                s_dim("└"),
+                s_dim(&truncate_str(args_preview, self.line_w.saturating_sub(6)))
+            )?;
+        }
+        self.state = StreamPhase::ToolCall;
+        Ok(())
+    }
+
+    /// 打印工具返回结果
+    fn print_tool_result(&mut self, success: bool, summary: &str) -> io::Result<()> {
+        if success {
+            writeln!(
+                self.term,
+                "  {} {}",
+                s_success("✓"),
+                s_dim(&truncate_str(summary, self.line_w.saturating_sub(6)))
+            )?;
+        } else {
+            writeln!(
+                self.term,
+                "  {} {}",
+                s_error("✗"),
+                s_error(&truncate_str(summary, self.line_w.saturating_sub(6)))
+            )?;
+        }
+        Ok(())
+    }
+
     // ── 公开方法，供 main.rs 的 stream 循环调用 ──
 
-    /// 处理推理链 token
+    /// 处理推理链完整块
     pub fn on_reasoning(&mut self, text: &str) -> io::Result<()> {
+        self.enter_reasoning()?;
+        write!(self.term, "{}", text)?;
+        self.term.flush()
+    }
+
+    /// 处理推理链增量（流式 token）
+    pub fn on_reasoning_delta(&mut self, text: &str) -> io::Result<()> {
         self.enter_reasoning()?;
         write!(self.term, "{}", text)?;
         self.term.flush()
@@ -312,6 +410,34 @@ impl StreamDisplay {
         self.term.flush()
     }
 
+    /// 处理工具调用：显示工具名 + 参数摘要
+    pub fn on_tool_call(&mut self, name: &str, args_preview: &str) -> io::Result<()> {
+        self.print_tool_call(name, args_preview)
+    }
+
+    /// 处理工具调用的增量参数流
+    pub fn on_tool_call_delta(&mut self, delta: &str) -> io::Result<()> {
+        if self.state != StreamPhase::ToolCallDelta {
+            self.finish_phase()?;
+            self.state = StreamPhase::ToolCallDelta;
+        }
+        write!(self.term, "{}", s_dim(delta))?;
+        self.term.flush()
+    }
+
+    /// 处理工具执行结果
+    pub fn on_tool_result(&mut self, success: bool, summary: &str) -> io::Result<()> {
+        self.print_tool_result(success, summary)
+    }
+
+    /// 处理 CompletionCall（记录每个 provider 调用的 token 用量）
+    pub fn on_completion_call(&mut self, total_tool_calls: u32, usage: Option<Usage>) {
+        self.total_tool_calls = total_tool_calls;
+        if let Some(u) = usage {
+            self.completion_calls.push((self.tool_call_count, u));
+        }
+    }
+
     /// 处理流错误
     pub fn on_error(&mut self, err: &str) {
         let _ = writeln!(self.term);
@@ -322,17 +448,50 @@ impl StreamDisplay {
     pub fn finalize(&mut self, usage: &Usage) {
         let _ = writeln!(self.term);
         if usage.total_tokens > 0 {
+            // 显示每轮 completion 的用量
+            for (idx, u) in &self.completion_calls {
+                let _ = writeln!(
+                    self.term,
+                    "  {} {}",
+                    s_dim(&format!("⏺ Round #{}", idx)),
+                    s_dim(&format!(
+                        "in: {}  out: {}",
+                        fmt_tokens(u.input_tokens),
+                        fmt_tokens(u.output_tokens)
+                    ))
+                );
+            }
+            let _ = writeln!(self.term);
             let dash = "─".repeat(self.line_w.saturating_sub(30).max(10));
             let _ = writeln!(
                 self.term,
                 "{}  {}",
                 s_dim("📊"),
                 s_dim(&format!(
-                    "Token 统计 —{} 输入 {} | 输出 {} | 总计 {}",
-                    dash, usage.input_tokens, usage.output_tokens, usage.total_tokens
+                    "总计 —{} 输入 {} | 输出 {} | {} tokens",
+                    dash,
+                    fmt_tokens(usage.input_tokens),
+                    fmt_tokens(usage.output_tokens),
+                    fmt_tokens(usage.total_tokens)
                 ))
             );
         }
         let _ = writeln!(self.term);
+    }
+}
+
+/// 截断字符串到指定宽度（按字符数，非字节）
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() > max_chars {
+        format!(
+            "{}...",
+            chars
+                .into_iter()
+                .take(max_chars.saturating_sub(3))
+                .collect::<String>()
+        )
+    } else {
+        s.to_string()
     }
 }

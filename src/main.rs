@@ -8,12 +8,12 @@ use std::io::Write;
 use anyhow::Result;
 use console::style;
 use futures_util::stream::StreamExt;
-use rig::agent::{FinalResponse, MultiTurnStreamItem, Text};
-use rig::message::Message;
+use rig::agent::{CompletionCall, FinalResponse, MultiTurnStreamItem, Text};
+use rig::message::{Message, ToolCall, ToolResult, ToolResultContent};
 use rig::prelude::*;
 use rig::providers::deepseek;
 use rig::providers::deepseek::Client as DeepSeekClient;
-use rig::streaming::{StreamedAssistantContent, StreamingChat};
+use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat};
 use tokio::io::AsyncBufReadExt;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -31,7 +31,7 @@ mod ui;
 async fn main() -> Result<()> {
     // ---- 初始化日志系统 ----
     let filter_layer = tracing_subscriber::filter::Targets::new()
-        .with_default(tracing::Level::INFO)
+        .with_default(tracing::Level::TRACE)
         .with_target("reqwest", LevelFilter::WARN)
         .with_target("hyper_util", LevelFilter::WARN)
         .with_target("h2", LevelFilter::WARN)
@@ -171,26 +171,97 @@ async fn main() -> Result<()> {
 
         while let Some(content) = stream.next().await {
             match content {
+                // ── 回答文本增量 ──
                 Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                     Text { text, .. },
                 ))) => {
                     display.on_answer(&text)?;
                 }
 
+                // ── 推理链增量（流式） ──
+                Ok(MultiTurnStreamItem::StreamAssistantItem(
+                    StreamedAssistantContent::ReasoningDelta { reasoning, .. },
+                )) => {
+                    display.on_reasoning_delta(&reasoning)?;
+                }
+
+                // ── 推理链完整块 ──
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::Reasoning(reasoning),
                 )) => {
                     display.on_reasoning(&reasoning.display_text())?;
                 }
 
+                // ── 工具调用 ──
+                Ok(MultiTurnStreamItem::StreamAssistantItem(
+                    StreamedAssistantContent::ToolCall {
+                        tool_call: ToolCall { function, .. },
+                        ..
+                    },
+                )) => {
+                    let args_preview =
+                        serde_json::to_string(&function.arguments).unwrap_or_default();
+                    display.on_tool_call(&function.name, &args_preview)?;
+                }
+
+                // ── 工具调用参数增量 ──
+                Ok(MultiTurnStreamItem::StreamAssistantItem(
+                    StreamedAssistantContent::ToolCallDelta { content, .. },
+                )) => {
+                    use rig::streaming::ToolCallDeltaContent;
+                    match content {
+                        ToolCallDeltaContent::Name(name) => {
+                            display.on_tool_call_delta(&format!("[调用: {}]", name))?;
+                        }
+                        ToolCallDeltaContent::Delta(delta) => {
+                            display.on_tool_call_delta(&delta)?;
+                        }
+                    }
+                }
+
+                // ── 工具返回结果 ──
+                Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                    tool_result: ToolResult { content, .. },
+                    ..
+                })) => {
+                    let summary = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            ToolResultContent::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let success = !summary.to_lowercase().contains("error")
+                        && !summary.to_lowercase().contains("failed");
+                    let preview = if summary.len() > 200 {
+                        format!("{}...", &summary[..200])
+                    } else {
+                        summary
+                    };
+                    display.on_tool_result(success, &preview)?;
+                }
+
+                // ── Provider Completion 调用详情 ──
+                Ok(MultiTurnStreamItem::CompletionCall(CompletionCall {
+                    call_index,
+                    usage,
+                    ..
+                })) => {
+                    display.on_completion_call(call_index as u32, usage);
+                }
+
+                // ── Agent 最终响应 ──
                 Ok(MultiTurnStreamItem::FinalResponse(res)) => {
                     final_res = res;
                 }
 
+                // ── 流错误 ──
                 Err(err) => {
                     display.on_error(&format!("AI 响应流错误: {err}"));
                 }
 
+                // ── Provider 最终响应 / 其他（忽略） ──
                 _ => {}
             }
         }
