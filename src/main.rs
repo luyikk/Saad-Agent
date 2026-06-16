@@ -19,7 +19,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::*;
 
 // ── Permission levels ────────────────────────────────────────────
-const PERM_PROMPT: u8 = 0;           // 每次都询问
+const PERM_PROMPT: u8 = 0; // 每次都询问
 const PERM_SESSION_ALLOW_ALL: u8 = 1; // 当前流程全部允许
 const PERM_PERMANENT_ALLOW_ALL: u8 = 2; // 永久允许（持久化）
 
@@ -83,7 +83,10 @@ async fn confirm_execution(cmdline: &str) -> Result<(), CmdError> {
         "p" => {
             PERMISSION_LEVEL.store(PERM_PERMANENT_ALLOW_ALL, Ordering::Relaxed);
             save_permanent_permission();
-            println!("✅ 已永久允许。如需恢复询问，请删除文件: {}", perm_config_path().display());
+            println!(
+                "✅ 已永久允许。如需恢复询问，请删除文件: {}",
+                perm_config_path().display()
+            );
             Ok(())
         }
         _ => Err(CmdError::ToolCallError(Box::new(std::io::Error::new(
@@ -186,7 +189,11 @@ impl Tool for RunCmd {
             Ok(if out.is_empty() && !err.is_empty() {
                 err.to_string()
             } else {
-                out.to_string()
+                if out.trim().is_empty() {
+                    "Command completed successfully with no output.".to_string()
+                } else {
+                    out.to_string()
+                }
             })
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -228,7 +235,7 @@ async fn main() -> Result<()> {
     // Load persisted permission state
     load_permanent_permission();
 
-    let client =deepseek::Client::new("sk-d8c73a5fda5b4df89b381c74689b3722")?; //ollama::Client::new(Nothing)?;
+    let client = deepseek::Client::new("sk-d8c73a5fda5b4df89b381c74689b3722")?; //ollama::Client::new(Nothing)?;
 
     let agent = client
         .agent("deepseek-v4-flash")
