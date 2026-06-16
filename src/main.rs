@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use anyhow::Result;
+use console::style;
 use rig::agent::stream_to_stdout;
 use rig::completion::{AssistantContent, Message, Usage};
 use rig::message::{Text, UserContent};
@@ -17,6 +18,7 @@ use tracing_subscriber::prelude::*;
 mod config;
 mod permission;
 mod tool;
+mod ui;
 
 // ============================================================
 // 对话历史持久化类型
@@ -131,7 +133,9 @@ fn message_preview(msg: &Message, max_chars: usize) -> String {
             .filter_map(|c| match c {
                 AssistantContent::Text(t) => Some(t.text.clone()),
                 AssistantContent::Reasoning(r) => Some(r.display_text()),
-                AssistantContent::ToolCall(tc) => Some(format!("[ToolCall: {}]", tc.function.name)),
+                AssistantContent::ToolCall(tc) => {
+                    Some(format!("[ToolCall: {}]", tc.function.name))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -158,23 +162,103 @@ fn message_role_name(msg: &Message) -> &'static str {
 }
 
 // ============================================================
-// 打印帮助信息
+// 命令处理
 // ============================================================
 
-fn print_help() {
-    println!();
-    println!("╔══════════════════════════════════════════════╗");
-    println!("║   Saad Agent 帮助                          ║");
-    println!("╠══════════════════════════════════════════════╣");
-    println!("║  /help    - 显示此帮助信息                 ║");
-    println!("║  /clear   - 清空对话历史                   ║");
-    println!("║  /save    - 保存对话历史到磁盘             ║");
-    println!("║  /load    - 从磁盘加载对话历史             ║");
-    println!("║  /history - 显示当前对话历史统计           ║");
-    println!("║  /exit    - 退出程序                       ║");
-    println!("║  Ctrl+C   - 优雅退出（自动保存历史）       ║");
-    println!("╚══════════════════════════════════════════════╝");
-    println!();
+/// 处理内置斜杠命令。返回 `Some(true)` 表示应退出程序。
+async fn handle_command(
+    cmd: &str,
+    history: &mut Vec<Message>,
+    max_history: usize,
+) -> Option<bool> {
+    match cmd.to_lowercase().as_str() {
+        "/exit" | "/quit" => {
+            if !history.is_empty() {
+                let _ = save_history(history);
+            }
+            ui::print_goodbye(!history.is_empty());
+            Some(true) // 退出
+        }
+        "/help" => {
+            ui::print_help();
+            None
+        }
+        "/clear" => {
+            history.clear();
+            let _ = std::fs::remove_file(config::history_path());
+            ui::print_success("对话历史已清空");
+            None
+        }
+        "/save" => {
+            if history.is_empty() {
+                ui::print_warning("对话历史为空，无需保存");
+            } else {
+                match save_history(history) {
+                    Ok(()) => ui::print_success(&format!(
+                        "对话历史已保存 ({} 条消息)",
+                        history.len()
+                    )),
+                    Err(e) => ui::print_error(&format!("保存失败: {}", e)),
+                }
+            }
+            None
+        }
+        "/load" => {
+            match load_history() {
+                Ok(loaded) => {
+                    if loaded.is_empty() {
+                        ui::print_warning("没有找到保存的对话历史");
+                    } else {
+                        let count = loaded.len();
+                        *history = loaded;
+                        ui::print_success(&format!("已加载 {} 条历史消息", count));
+                    }
+                }
+                Err(e) => ui::print_error(&format!("加载失败: {}", e)),
+            }
+            None
+        }
+        "/history" => {
+            if history.is_empty() {
+                ui::print_info("当前对话历史为空");
+            } else {
+                println!(
+                    "{} 当前对话历史: {} 条消息 (限制: {} 条)",
+                    ui::s_dim("📝"),
+                    style(history.len()).yellow(),
+                    max_history
+                );
+                let start = if history.len() > 5 {
+                    history.len() - 5
+                } else {
+                    0
+                };
+                ui::print_divider();
+                for (i, msg) in history.iter().enumerate().skip(start) {
+                    let role = message_role_name(msg);
+                    let role_styled = match role {
+                        "user" => style("user").cyan(),
+                        "assistant" => style("assistant").green(),
+                        "system" => style("system").dim(),
+                        _ => style(role),
+                    };
+                    let preview = message_preview(msg, 70);
+                    println!(
+                        "  [{}] {} {}",
+                        style(i).dim(),
+                        role_styled,
+                        style(preview).dim()
+                    );
+                }
+                ui::print_divider();
+            }
+            None
+        }
+        _ => {
+            ui::print_error(&format!("未知命令: {cmd}。输入 /help 查看可用命令"));
+            None
+        }
+    }
 }
 
 // ============================================================
@@ -201,7 +285,7 @@ async fn main() -> Result<()> {
         .with(fmt_layer)
         .init();
 
-    // ---- 加载 .env 文件（可选） ----
+    // ---- 加载 .env 文件 ----
     let _ = dotenvy::dotenv();
 
     // ---- 加载持久化的权限状态 ----
@@ -227,7 +311,7 @@ async fn main() -> Result<()> {
         .tool(tool::fs::WriteFile)
         .build();
 
-    // ---- 尝试加载持久化的对话历史 ----
+    // ---- 加载对话历史 ----
     let mut history: Vec<Message> = load_history().unwrap_or_else(|e| {
         tracing::warn!("加载对话历史失败: {}，将使用全新对话", e);
         vec![]
@@ -235,52 +319,40 @@ async fn main() -> Result<()> {
 
     let max_history = config::get_max_history_messages();
 
-    println!();
-    println!("╔══════════════════════════════════════════╗");
-    println!("║   Saad Agent - AI 编程助手              ║");
-    println!("║   输入你的需求，我会帮你完成！           ║");
-    println!("║   输入 /help 查看命令列表               ║");
-    println!("╚══════════════════════════════════════════╝");
-
-    if !history.is_empty() {
-        println!("📂 已加载 {} 条历史消息", history.len());
-    }
+    // ---- 欢迎界面 ----
+    ui::print_welcome(history.len());
 
     // ---- 主交互循环 ----
     let stdin = tokio::io::stdin();
     let mut reader = tokio::io::BufReader::new(stdin);
 
     loop {
-        print!("\n> ");
+        // 美化提示符
+        print!("{} ", style("❯").cyan().bold());
         std::io::stdout().flush()?;
 
         let mut prompt = String::new();
 
-        // 使用 tokio::select! 同时等待输入和 Ctrl+C
+        // tokio::select! 同时等待输入和 Ctrl+C
         let read_result = tokio::select! {
-            result = reader.read_line(&mut prompt) => {
-                Some(result)
-            }
-            _ = tokio::signal::ctrl_c() => {
-                None // Ctrl+C 被按下
-            }
+            result = reader.read_line(&mut prompt) => Some(result),
+            _ = tokio::signal::ctrl_c() => None,
         };
 
         match read_result {
             None => {
-                // Ctrl+C 优雅退出
-                println!("\n\n👋 正在退出...");
+                // Ctrl+C → 优雅退出
+                println!();
                 if !history.is_empty() {
                     if let Err(e) = save_history(&history) {
                         tracing::warn!("保存对话历史失败: {}", e);
-                    } else {
-                        println!("💾 对话历史已自动保存");
                     }
                 }
+                ui::print_goodbye(!history.is_empty());
                 break;
             }
             Some(Err(e)) => {
-                tracing::error!("读取输入失败: {}", e);
+                ui::print_error(&format!("读取输入失败: {}", e));
                 break;
             }
             Some(Ok(0)) => {
@@ -300,83 +372,20 @@ async fn main() -> Result<()> {
 
         // ---- 处理内置命令 ----
         if prompt.starts_with('/') {
-            match prompt.to_lowercase().as_str() {
-                "/exit" | "/quit" => {
-                    println!("👋 再见！");
-                    if !history.is_empty() {
-                        let _ = save_history(&history);
-                    }
-                    break;
-                }
-                "/help" => {
-                    print_help();
-                    continue;
-                }
-                "/clear" => {
-                    history.clear();
-                    let _ = std::fs::remove_file(config::history_path());
-                    println!("🧹 对话历史已清空");
-                    continue;
-                }
-                "/save" => {
-                    if history.is_empty() {
-                        println!("⚠️  对话历史为空，无需保存");
-                    } else {
-                        match save_history(&history) {
-                            Ok(()) => {
-                                println!("💾 对话历史已保存 ({} 条消息)", history.len())
-                            }
-                            Err(e) => println!("❌ 保存失败: {}", e),
-                        }
-                    }
-                    continue;
-                }
-                "/load" => {
-                    match load_history() {
-                        Ok(loaded) => {
-                            if loaded.is_empty() {
-                                println!("⚠️  没有找到保存的对话历史");
-                            } else {
-                                history = loaded;
-                                println!("📂 已加载 {} 条历史消息", history.len());
-                            }
-                        }
-                        Err(e) => println!("❌ 加载失败: {}", e),
-                    }
-                    continue;
-                }
-                "/history" => {
-                    if history.is_empty() {
-                        println!("📝 当前对话历史为空");
-                    } else {
-                        println!(
-                            "📝 当前对话历史: {} 条消息 (限制: {} 条)",
-                            history.len(),
-                            max_history
-                        );
-                        let start = if history.len() > 5 {
-                            history.len() - 5
-                        } else {
-                            0
-                        };
-                        for (i, msg) in history.iter().enumerate().skip(start) {
-                            let role = message_role_name(msg);
-                            let preview = message_preview(msg, 60);
-                            println!("  [{i}] {role}: {preview}");
-                        }
-                    }
-                    continue;
-                }
-                _ => {
-                    println!("❓ 未知命令: {prompt}。输入 /help 查看可用命令");
-                    continue;
-                }
+            if let Some(true) = handle_command(&prompt, &mut history, max_history).await {
+                break; // 退出
             }
+            continue;
         }
 
-        // ---- 发送消息并流式输出回复 ----
+        // ---- 发送消息并流式输出 ----
         tracing::debug!("发送消息 (历史长度: {})", history.len());
+
+        // 显示 spinner 等待首个 token
+        let spinner = ui::new_spinner("AI 正在思考...");
         let mut stream = agent.stream_chat(prompt, &history).await;
+        spinner.finish_and_clear();
+
         let res = stream_to_stdout(&mut stream).await?;
 
         // 更新对话历史
@@ -387,9 +396,22 @@ async fn main() -> Result<()> {
         // 限制历史长度
         trim_history(&mut history, max_history);
 
-        // 打印 Token 使用统计
+        // Token 使用统计 (Usage 字段为 u64，非 Option)
         let usage: Usage = res.usage();
-        tracing::debug!("Token 使用情况: {:?}", usage);
+        if usage.total_tokens > 0 {
+            println!(
+                "\n{} {}",
+                ui::s_dim("📊"),
+                ui::s_dim(&format!(
+                    "Token: 输入 {} | 输出 {} | 总计 {}",
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.total_tokens
+                ))
+            );
+        }
+
+        println!();
     }
 
     Ok(())
