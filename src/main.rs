@@ -16,6 +16,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::*;
 
 mod config;
+mod error;
 mod permission;
 mod tool;
 mod ui;

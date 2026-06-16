@@ -8,20 +8,13 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use thiserror::Error;
+
+use crate::error::AgentError;
 
 #[derive(Deserialize, Debug)]
 pub struct OperationArgs {
     /// 完整的命令行语句，已包含所有参数（如 "Get-ChildItem -Path d:\\"）
     pub command: String,
-}
-
-#[derive(Debug, Error)]
-pub enum CmdError {
-    #[error("IO 错误: {0}")]
-    StdError(#[from] std::io::Error),
-    #[error("命令执行错误: {0}")]
-    StringError(String),
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -30,7 +23,7 @@ pub struct RunCmd;
 impl Tool for RunCmd {
     const NAME: &'static str = "RunCmd";
 
-    type Error = CmdError;
+    type Error = AgentError;
     type Args = OperationArgs;
     type Output = String;
 
@@ -84,7 +77,7 @@ impl Tool for RunCmd {
                 .args(["-c", &cmdline])
                 .output()
         }
-        .map_err(CmdError::StdError)?;
+        .map_err(AgentError::Io)?;
 
         if output.status.success() {
             let out = decode_output(&output.stdout);
@@ -107,7 +100,7 @@ impl Tool for RunCmd {
             } else {
                 stderr
             };
-            Err(CmdError::StringError(format!(
+            Err(AgentError::Other(format!(
                 "命令 '{}' 执行失败 (状态码 {}): {}",
                 cmdline,
                 output.status,

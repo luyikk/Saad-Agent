@@ -5,8 +5,9 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use thiserror::Error;
 use tracing;
+
+use crate::error::AgentError;
 
 // ============================================================
 // ReadFile
@@ -20,21 +21,13 @@ pub struct ReadFileArgs {
     pub max_lines: Option<usize>,
 }
 
-#[derive(Debug, Error)]
-pub enum FsError {
-    #[error("IO 错误: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("{0}")]
-    Other(String),
-}
-
 #[derive(Deserialize, Serialize, Debug)]
 pub struct ReadFile;
 
 impl Tool for ReadFile {
     const NAME: &'static str = "ReadFile";
 
-    type Error = FsError;
+    type Error = AgentError;
     type Args = ReadFileArgs;
     type Output = String;
 
@@ -67,7 +60,7 @@ impl Tool for ReadFile {
         tracing::trace!("读取文件: {path}，最大行数: {max_lines}");
 
         let content = std::fs::read_to_string(path)
-            .map_err(|e| FsError::Other(format!("无法读取文件 '{path}': {e}")))?;
+            .map_err(|e| AgentError::Other(format!("无法读取文件 '{path}': {e}")))?;
 
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
@@ -116,7 +109,7 @@ pub struct WriteFile;
 impl Tool for WriteFile {
     const NAME: &'static str = "WriteFile";
 
-    type Error = FsError;
+    type Error = AgentError;
     type Args = WriteFileArgs;
     type Output = String;
 
@@ -154,7 +147,7 @@ impl Tool for WriteFile {
         if let Some(parent) = std::path::Path::new(path).parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| {
-                    FsError::Other(format!("无法创建目录 '{}': {}", parent.display(), e))
+                    AgentError::Other(format!("无法创建目录 '{}': {}", parent.display(), e))
                 })?;
             }
         }
@@ -162,7 +155,7 @@ impl Tool for WriteFile {
         tracing::trace!("写入文件: {path}，{} 字节", content.len());
 
         std::fs::write(path, content)
-            .map_err(|e| FsError::Other(format!("无法写入文件 '{path}': {e}")))?;
+            .map_err(|e| AgentError::Other(format!("无法写入文件 '{path}': {e}")))?;
 
         Ok(format!(
             "✅ 已成功写入文件: {path} ({} 字节)",

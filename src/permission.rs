@@ -4,8 +4,7 @@
 /// 支持四种级别：每次询问、会话内全部允许、永久允许、拒绝。
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::tool::cmd::CmdError;
-use crate::tool::fs::FsError;
+use crate::error::AgentError;
 
 /// 权限级别：每次执行都询问用户
 pub const PERM_PROMPT: u8 = 0;
@@ -73,7 +72,7 @@ fn handle_selection(selection: usize, action_desc: &str) -> Result<(), String> {
 /// 根据当前权限级别决定是否需要交互：
 /// - `PERM_SESSION_ALLOW_ALL` / `PERM_PERMANENT_ALLOW_ALL` → 自动允许
 /// - `PERM_PROMPT` → 显示 `dialoguer::Select` 交互界面
-pub async fn confirm_execution(cmdline: &str) -> Result<(), CmdError> {
+pub async fn confirm_execution(cmdline: &str) -> Result<(), AgentError> {
     let level = PERMISSION_LEVEL.load(Ordering::Relaxed);
     match level {
         PERM_SESSION_ALLOW_ALL | PERM_PERMANENT_ALLOW_ALL => return Ok(()),
@@ -83,13 +82,13 @@ pub async fn confirm_execution(cmdline: &str) -> Result<(), CmdError> {
     // 使用 dialoguer 交互选择
     match crate::ui::select_permission("即将执行命令:", cmdline) {
         Some(selection) => handle_selection(selection, &format!("命令执行: {cmdline}"))
-            .map_err(CmdError::StringError),
-        None => Err(CmdError::StringError("权限选择已取消".to_string())),
+            .map_err(AgentError::Other),
+        None => Err(AgentError::Other("权限选择已取消".to_string())),
     }
 }
 
 /// 询问用户是否允许写入文件
-pub async fn confirm_file_write(path: &str) -> Result<(), FsError> {
+pub async fn confirm_file_write(path: &str) -> Result<(), AgentError> {
     let level = PERMISSION_LEVEL.load(Ordering::Relaxed);
     match level {
         PERM_SESSION_ALLOW_ALL | PERM_PERMANENT_ALLOW_ALL => return Ok(()),
@@ -98,8 +97,8 @@ pub async fn confirm_file_write(path: &str) -> Result<(), FsError> {
 
     match crate::ui::select_permission("即将写入文件:", path) {
         Some(selection) => {
-            handle_selection(selection, &format!("文件写入: {path}")).map_err(FsError::Other)
+            handle_selection(selection, &format!("文件写入: {path}")).map_err(AgentError::Other)
         }
-        None => Err(FsError::Other("权限选择已取消".to_string())),
+        None => Err(AgentError::Other("权限选择已取消".to_string())),
     }
 }
