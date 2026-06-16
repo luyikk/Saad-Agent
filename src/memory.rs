@@ -141,7 +141,6 @@ impl ConversationMemory {
                         text
                     };
                     self.summary = Some(new_summary);
-                    self.messages.clear();
                     tracing::info!(
                         "记忆压缩完成，摘要长度: {} 字符",
                         self.summary.as_ref().map_or(0, |s| s.len())
