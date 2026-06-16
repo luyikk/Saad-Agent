@@ -1,24 +1,15 @@
 //! 对话历史持久化模块
 //!
 //! 负责消息的序列化/反序列化、保存到 JSON 文件、加载以及长度裁剪。
+//! `rig::message::Message` 原生支持 `Serialize + Deserialize`，无需中间类型。
 
 use anyhow::Result;
 use rig::completion::AssistantContent;
-use rig::message::{Message, Text, UserContent};
-use serde::{Deserialize, Serialize};
+use rig::message::{Message, UserContent};
 
 use crate::config;
 
-// ============================================================
-// 类型定义
-// ============================================================
 
-/// 可序列化的消息，用于 JSON 持久化
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SavedMessage {
-    pub role: String,
-    pub content: String,
-}
 
 // ============================================================
 // 消息文本提取
@@ -52,7 +43,6 @@ pub fn message_text(msg: &Message) -> String {
 /// 从 Message 中提取文本用于预览（限制最大字符数）
 pub fn message_preview(msg: &Message, max_chars: usize) -> String {
     let text = message_text(msg);
-
     let chars: Vec<char> = text.chars().collect();
     if chars.len() > max_chars {
         format!(
@@ -74,40 +64,6 @@ pub const fn message_role_name(msg: &Message) -> &'static str {
 }
 
 // ============================================================
-// SavedMessage 转换
-// ============================================================
-
-impl SavedMessage {
-    pub fn from_rig(msg: &Message) -> Self {
-        let (role, content) = match msg {
-            Message::System { .. } => ("system".to_string(), message_text(msg)),
-            Message::User { .. } => ("user".to_string(), message_text(msg)),
-            Message::Assistant { .. } => ("assistant".to_string(), message_text(msg)),
-        };
-        Self { role, content }
-    }
-
-    pub fn to_rig(&self) -> Message {
-        match self.role.as_str() {
-            "system" => Message::System {
-                content: self.content.clone(),
-            },
-            "user" => Message::User {
-                content: rig::one_or_many::OneOrMany::one(UserContent::Text(Text::new(
-                    self.content.clone(),
-                ))),
-            },
-            _ => Message::Assistant {
-                id: None,
-                content: rig::one_or_many::OneOrMany::one(AssistantContent::Text(Text::new(
-                    self.content.clone(),
-                ))),
-            },
-        }
-    }
-}
-
-// ============================================================
 // 持久化 I/O
 // ============================================================
 
@@ -117,10 +73,9 @@ pub fn save_history(history: &[Message]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let saved: Vec<SavedMessage> = history.iter().map(SavedMessage::from_rig).collect();
-    let json = serde_json::to_string_pretty(&saved)?;
+    let json = serde_json::to_string_pretty(history)?;
     std::fs::write(&path, json)?;
-    tracing::debug!("对话历史已保存到: {}", path.display());
+    tracing::debug!("对话历史已保存到: {} ({} 条消息)", path.display(), history.len());
     Ok(())
 }
 
@@ -131,8 +86,7 @@ pub fn load_history() -> Result<Vec<Message>> {
         return Ok(vec![]);
     }
     let json = std::fs::read_to_string(&path)?;
-    let saved: Vec<SavedMessage> = serde_json::from_str(&json)?;
-    let messages: Vec<Message> = saved.iter().map(SavedMessage::to_rig).collect();
+    let messages: Vec<Message> = serde_json::from_str(&json)?;
     tracing::debug!("从 {} 加载了 {} 条历史消息", path.display(), messages.len());
     Ok(messages)
 }

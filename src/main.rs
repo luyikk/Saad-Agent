@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
     // ---- 构建 AI Agent ----
     let api_key = config::get_api_key().map_err(|e| anyhow::anyhow!(e))?;
     let client = deepseek::Client::new(&api_key)?;
-    let agent = build_agent(&client);
+    let mut agent = build_agent(&client);
 
     // ---- 加载对话历史 ----
     let mut history = memory::load_history().unwrap_or_else(|e| {
@@ -63,8 +63,12 @@ async fn main() -> Result<()> {
 
         // 内置斜杠命令
         if prompt.starts_with('/') {
-            if let Some(true) = command::handle_command(&prompt, &mut history, max_history) {
-                break;
+            match command::handle_command(&prompt, &mut history, max_history) {
+                command::CommandResult::Exit => break,
+                command::CommandResult::RebuildAgent => {
+                    agent = build_agent(&client);
+                }
+                command::CommandResult::Continue => {}
             }
             continue;
         }
@@ -121,16 +125,16 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
         std::env::current_dir().map_or_else(|_| "未知".to_string(), |p| p.display().to_string());
 
     let mut notes = vec![
-        "- 所有相对路径都基于上述工作目录".to_string(),
-        "- 在执行命令或读写文件时，优先使用绝对路径".to_string(),
-        "- 如果不确定某个文件的位置，先用 Get-ChildItem / ls 探索目录结构".to_string(),
+        "- 所有相对路径都基于上述工作目录",
+        "- 在执行命令或读写文件时，优先使用绝对路径",
+        "- 如果不确定某个文件的位置，先用 Get-ChildItem / ls 探索目录结构",
+        "- 如果创建了临时文件用于某个命令，执行完后请及时删除以免混乱",
     ];
 
     // Windows + 非 PowerShell 7 → 禁止 && 语法
     if cfg!(target_os = "windows") && !ps_supports_and_and() {
         notes.push(
             "- 当前环境为 Windows PowerShell 5.1，绝对禁止使用 '&&' 或 '||' 连接命令！请用 ';' 分隔或分次执行。"
-                .to_string(),
         );
     }
 
