@@ -46,21 +46,18 @@ where
             }
 
             // ── 推理链完整块 ──
-            Ok(MultiTurnStreamItem::StreamAssistantItem(
-                StreamedAssistantContent::Reasoning(reasoning),
-            )) => {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
+                reasoning,
+            ))) => {
                 let _ = display.on_reasoning(&reasoning.display_text());
             }
 
             // ── 工具调用 ──
-            Ok(MultiTurnStreamItem::StreamAssistantItem(
-                StreamedAssistantContent::ToolCall {
-                    tool_call: ToolCall { function, .. },
-                    ..
-                },
-            )) => {
-                let args_preview =
-                    serde_json::to_string(&function.arguments).unwrap_or_default();
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
+                tool_call: ToolCall { function, .. },
+                ..
+            })) => {
+                let args_preview = serde_json::to_string(&function.arguments).unwrap_or_default();
                 let _ = display.on_tool_call(&function.name, &args_preview);
             }
 
@@ -94,7 +91,7 @@ where
                     .join("\n");
                 let success = !summary.to_lowercase().contains("error")
                     && !summary.to_lowercase().contains("failed");
-                let preview = truncate_str(&summary, 200);
+                let preview = crate::ui::truncate_str(&summary, 200);
                 let _ = display.on_tool_result(success, &preview);
             }
 
@@ -122,17 +119,4 @@ where
 
     display.finalize(&final_res.usage());
     final_res
-}
-
-/// 截断字符串到指定字符数，超出部分用 `...` 表示
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() > max_chars {
-        format!(
-            "{}...",
-            chars.into_iter().take(max_chars.saturating_sub(3)).collect::<String>()
-        )
-    } else {
-        s.to_string()
-    }
 }

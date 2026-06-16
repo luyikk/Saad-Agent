@@ -253,10 +253,8 @@ pub struct StreamDisplay {
     state: StreamPhase,
     /// 分隔线宽度（取终端宽度与 80 的较小值）
     line_w: usize,
-    /// 工具调用计数器（用于编号 `Tool #1`）
+    /// 工具调用计数器（用于编号）
     tool_call_count: u32,
-    /// 当前工具调用总数（来自 CompletionCall）
-    total_tool_calls: u32,
     /// 累积每个 CompletionCall 的 token 用量
     completion_calls: Vec<(u32, Usage)>,
 }
@@ -284,7 +282,6 @@ impl StreamDisplay {
             state: StreamPhase::Idle,
             line_w: width.min(80),
             tool_call_count: 0,
-            total_tool_calls: 0,
             completion_calls: Vec::new(),
         }
     }
@@ -342,17 +339,11 @@ impl StreamDisplay {
     fn print_tool_call(&mut self, name: &str, args_preview: &str) -> io::Result<()> {
         self.finish_phase()?;
         self.tool_call_count += 1;
-        let icon = style("⏺").cyan();
-        let counter = if self.total_tool_calls > 0 {
-            format!("[{}/{}]", self.tool_call_count, self.total_tool_calls)
-        } else {
-            format!("#{}", self.tool_call_count)
-        };
         writeln!(
             self.term,
             "{} {} {}",
-            icon,
-            style(&counter).cyan().dim(),
+            style("⏺").cyan(),
+            style(&format!("#{}", self.tool_call_count)).cyan().dim(),
             style(name).cyan().bold()
         )?;
         if !args_preview.is_empty() {
@@ -430,11 +421,27 @@ impl StreamDisplay {
         self.print_tool_result(success, summary)
     }
 
-    /// 处理 CompletionCall（记录每个 provider 调用的 token 用量）
-    pub fn on_completion_call(&mut self, total_tool_calls: u32, usage: Option<Usage>) {
-        self.total_tool_calls = total_tool_calls;
+    /// 处理 CompletionCall：立即打印本轮 token 用量（Claude Code CLI 风格）
+    pub fn on_completion_call(&mut self, call_index: u32, usage: Option<Usage>) {
+        if let Some(ref u) = usage {
+            self.completion_calls.push((call_index, *u));
+        }
+
+        // Claude Code CLI 风格: `  ⏺  Turn 1 · 1.2k input · 0.3k output`
         if let Some(u) = usage {
-            self.completion_calls.push((self.tool_call_count, u));
+            let turn = call_index + 1; // call_index 是 0-based，显示用 1-based
+            let _ = writeln!(self.term);
+            let _ = writeln!(
+                self.term,
+                "  {}  {} {}  {} {}  {} {}",
+                s_dim("⏺"),
+                s_dim("Turn"),
+                s_dim(&turn.to_string()),
+                s_dim("·"),
+                s_dim(&format!("{} input", fmt_tokens(u.input_tokens))),
+                s_dim("·"),
+                s_dim(&format!("{} output", fmt_tokens(u.output_tokens))),
+            );
         }
     }
 
@@ -448,27 +455,13 @@ impl StreamDisplay {
     pub fn finalize(&mut self, usage: &Usage) {
         let _ = writeln!(self.term);
         if usage.total_tokens > 0 {
-            // 显示每轮 completion 的用量
-            for (idx, u) in &self.completion_calls {
-                let _ = writeln!(
-                    self.term,
-                    "  {} {}",
-                    s_dim(&format!("⏺ Round #{}", idx)),
-                    s_dim(&format!(
-                        "in: {}  out: {}",
-                        fmt_tokens(u.input_tokens),
-                        fmt_tokens(u.output_tokens)
-                    ))
-                );
-            }
-            let _ = writeln!(self.term);
             let dash = "─".repeat(self.line_w.saturating_sub(30).max(10));
             let _ = writeln!(
                 self.term,
                 "{}  {}",
                 s_dim("📊"),
                 s_dim(&format!(
-                    "总计 —{} 输入 {} | 输出 {} | {} tokens",
+                    "总计 —{} 输入 {} · 输出 {} · {} tokens",
                     dash,
                     fmt_tokens(usage.input_tokens),
                     fmt_tokens(usage.output_tokens),
@@ -481,7 +474,7 @@ impl StreamDisplay {
 }
 
 /// 截断字符串到指定宽度（按字符数，非字节）
-fn truncate_str(s: &str, max_chars: usize) -> String {
+pub fn truncate_str(s: &str, max_chars: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() > max_chars {
         format!(
