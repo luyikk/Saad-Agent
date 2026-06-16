@@ -2,6 +2,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use crate::CmdError::StringError;
 use anyhow::Result;
 use rig::agent::stream_to_stdout;
 use rig::client::Nothing;
@@ -71,7 +72,7 @@ async fn confirm_execution(cmdline: &str) -> Result<(), CmdError> {
     tokio::io::BufReader::new(tokio::io::stdin())
         .read_line(&mut confirmation)
         .await
-        .map_err(|e| CmdError::ToolCallError(Box::new(e)))?;
+        .map_err(|e| CmdError::StdError(e))?;
 
     match confirmation.trim().to_lowercase().as_str() {
         "y" | "yes" => Ok(()),
@@ -89,10 +90,9 @@ async fn confirm_execution(cmdline: &str) -> Result<(), CmdError> {
             );
             Ok(())
         }
-        _ => Err(CmdError::ToolCallError(Box::new(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("User denied execution of: {cmdline}"),
-        )))),
+        _ => Err(CmdError::StringError(format!(
+            "User denied execution of: {cmdline}"
+        ))),
     }
 }
 
@@ -107,8 +107,10 @@ struct OperationArgs {
 #[derive(Debug, thiserror::Error)]
 #[error("cmd error")]
 enum CmdError {
-    #[error("Tool call error: {0}")]
-    ToolCallError(#[from] Box<dyn std::error::Error + Send + Sync + 'static>),
+    #[error("error: {0}")]
+    StdError(#[from] std::io::Error),
+    #[error("error: {0}")]
+    StringError(String),
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -181,33 +183,30 @@ impl Tool for RunCmd {
         } else {
             std::process::Command::new(&cmd).args(&cmd_args).output()
         }
-        .map_err(|e| CmdError::ToolCallError(Box::new(e)))?;
+        .map_err(|e| CmdError::StdError(e))?;
 
         if output.status.success() {
             let out = String::from_utf8_lossy(&output.stdout);
             let err = String::from_utf8_lossy(&output.stderr);
-            Ok(if out.is_empty() && !err.is_empty() {
-                err.to_string()
+            if out.is_empty() && !err.is_empty() {
+                Err(StringError(err.to_string()))
             } else {
                 if out.trim().is_empty() {
-                    "Command completed successfully with no output.".to_string()
+                    Ok("Command completed successfully with no output.".to_string())
                 } else {
-                    out.to_string()
+                    Ok(out.to_string())
                 }
-            })
+            }
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             let msg = if stderr.is_empty() { stdout } else { stderr };
-            Err(CmdError::ToolCallError(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
-                    "Command '{}' failed with status {}: {}",
-                    cmdline,
-                    output.status,
-                    msg.trim(),
-                ),
-            ))))
+            Err(StringError(format!(
+                "Command '{}' failed with status {}: {}",
+                cmdline,
+                output.status,
+                msg.trim(),
+            )))
         }
     }
 }
@@ -235,7 +234,7 @@ async fn main() -> Result<()> {
     // Load persisted permission state
     load_permanent_permission();
 
-    let client = deepseek::Client::new("sk-d8c73a5fda5b4df89b381c74689b3722")?; //ollama::Client::new(Nothing)?;
+    let client = deepseek::Client::new("key")?; //ollama::Client::new(Nothing)?;
 
     let agent = client
         .agent("deepseek-v4-flash")
@@ -243,6 +242,7 @@ async fn main() -> Result<()> {
         .name("Saad")
         .default_max_turns(100)
         .temperature(0.5)
+        .max_tokens(4096)
         .tool(RunCmd)
         .build();
 
@@ -258,6 +258,7 @@ async fn main() -> Result<()> {
 
         let mut stream = agent.stream_chat(prompt, &history).await;
         let res = stream_to_stdout(&mut stream).await?;
+
         history.extend_from_slice(res.history().unwrap_or_default());
         println!();
         println!("Token usage response: {usage:?}", usage = res.usage());
