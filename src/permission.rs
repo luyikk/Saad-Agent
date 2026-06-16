@@ -201,3 +201,27 @@ pub fn confirm_cross_directory(detail: &str) -> Result<(), AgentError> {
         },
     )
 }
+
+/// 询问用户是否允许执行检测到危险模式的命令
+///
+/// 与 `confirm_execution` 共享同一个全局权限级别。
+/// 当用户选择"会话全部允许"或"永久允许"后，危险命令也会自动放行。
+pub fn confirm_dangerous(reason: &str, cmd: &str) -> Result<(), AgentError> {
+    let level = PERMISSION_LEVEL.load(Ordering::Relaxed);
+    match level {
+        PERM_SESSION_ALLOW_ALL | PERM_PERMANENT_ALLOW_ALL => {
+            tracing::warn!("危险命令自动放行（全局权限）: {cmd}");
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let action_desc = format!("{reason}\n  📋 命令: {cmd}");
+
+    crate::ui::select_permission("⚠ 危险命令检测", &action_desc).map_or_else(
+        || Err(AgentError::Other("权限选择已取消".to_string())),
+        |selection| {
+            handle_selection(selection, &format!("危险命令: {cmd}")).map_err(AgentError::Other)
+        },
+    )
+}

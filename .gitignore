@@ -1,4 +1,4 @@
-﻿# Rust 构建输出
+# Rust 构建输出
 target/
 
 # 环境变量文件（包含敏感信息）
@@ -16,3 +16,6 @@ Thumbs.db
 
 # Agent 数据
 .saad-agent/
+
+# 代码索引工具缓存
+.codegraph/

@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use rig::completion::{AssistantContent, CompletionModel};
-use rig::message::{Message, ToolResultContent, UserContent};
+use rig::message::{Message, UserContent};
 
 use crate::config;
 
@@ -80,38 +80,27 @@ impl ConversationMemory {
         self.summary = None;
     }
 
-    /// 扩展消息历史，自动过滤无用的历史记录：
+    /// 扩展消息历史，只保留纯文本聊天记录：
     ///
-    /// 1. **空消息** — 丢弃没有任何文本内容的消息
-    /// 2. **纯工具调用** — 丢弃 Assistant 仅发出工具调用（无文本/推理）的中间步骤
-    /// 3. **无用的工具结果** — 丢弃内容为空的 ToolResult 消息
+    /// 1. **只留 Text** — User 只保留 `UserContent::Text`，Assistant 只保留 `AssistantContent::Text`
+    /// 2. **空消息** — 丢弃过滤后没有任何文本内容的消息
+    /// 3. **过长截断** — 单条消息超过 `MAX_MESSAGE_CHARS` 字符时自动截断
     /// 4. **连续重复** — 丢弃与上一条完全相同的消息（常见于重试/循环）
-    /// 5. **过长截断** — 单条消息超过 `MAX_MESSAGE_CHARS` 字符时自动截断
     pub fn extend(&mut self, new_messages: &[Message]) {
         for msg in new_messages {
-            // ① 跳过空消息
-            if is_message_empty(msg) {
-                tracing::debug!("跳过空消息: role={}", message_role_name(msg));
-                continue;
-            }
+            // ① 只保留 Text 内容，丢弃 ToolCall/ToolResult/Reasoning/Image 等
+            let filtered = keep_only_text(msg);
 
-            // ② 跳过纯工具调用（Assistant 只发 ToolCall，没有文本/推理）
-            if is_pure_tool_call(msg) {
-                tracing::debug!("跳过纯工具调用: role={}", message_role_name(msg));
+            // ② 跳过过滤后为空的消息
+            let Some(mut filtered) = filtered else {
+                tracing::debug!("跳过空消息(无 Text 内容): role={}", message_role_name(msg));
                 continue;
-            }
+            };
 
-            // ③ 跳过无用的工具结果（ToolResult 内容全为空）
-            if is_useless_tool_result(msg) {
-                tracing::debug!("跳过无用的工具结果: role={}", message_role_name(msg));
-                continue;
-            }
-
-            // ④ 克隆后截断过长文本
-            let mut filtered = msg.clone();
+            // ③ 截断过长文本
             truncate_message_texts(&mut filtered);
 
-            // ⑤ 去重：跳过与上一条完全相同的消息
+            // ④ 去重：跳过与上一条完全相同的消息
             if self.messages.last() == Some(&filtered) {
                 tracing::debug!("跳过重复消息: role={}", message_role_name(msg));
                 continue;
@@ -205,6 +194,7 @@ impl ConversationMemory {
 
                 // ✅ 摘要成功后，安全移除旧消息
                 self.messages.drain(..split_at);
+                self.save_to_disk()?;
                 Ok(true)
             }
             Err(e) => {
@@ -237,83 +227,55 @@ impl ConversationMemory {
 }
 
 // ============================================================
+// extend 辅助: 剥离工具内容
+// ============================================================
+
+// ============================================================
 // extend 辅助: 消息过滤与截断
 // ============================================================
 
-/// 判断消息是否完全没有文本内容（应被丢弃）
-fn is_message_empty(msg: &Message) -> bool {
-    match msg {
-        Message::System { content } => content.trim().is_empty(),
-        Message::User { content } => content.iter().all(|c| match c {
-            UserContent::Text(t) => t.text.trim().is_empty(),
-            UserContent::ToolResult(tr) => tr.content.iter().all(|tc| match tc {
-                ToolResultContent::Text(t) => t.text.trim().is_empty(),
-                ToolResultContent::Image(_) => false,
-            }),
-            // Image / Audio / Video / Document 视为有内容
-            _ => false,
-        }),
-        Message::Assistant { content, .. } => content.iter().all(|c| match c {
-            AssistantContent::Text(t) => t.text.trim().is_empty(),
-            // ToolCall / Reasoning / Image 视为有内容
-            _ => false,
-        }),
-    }
-}
-
-/// 判断 Assistant 消息是否为"纯工具调用"：只有 ToolCall，没有文本或推理
+/// 只保留 Text 内容：User 只留 `UserContent::Text`，Assistant 只留 `AssistantContent::Text`
 ///
-/// 这类消息是 Agent 循环中的中间步骤（如 "调用 read_file"），
-/// 真正的信息在 ToolResult 中，保留 ToolCall 只会浪费 token。
-fn is_pure_tool_call(msg: &Message) -> bool {
-    match msg {
-        Message::Assistant { content, .. } => {
-            if content.is_empty() {
-                return false; // 空消息由 is_message_empty 处理
-            }
-            content
-                .iter()
-                .all(|c| matches!(c, AssistantContent::ToolCall(_)))
-        }
-        _ => false,
-    }
-}
-
-/// 判断 User 消息是否只包含"无用"的工具结果
-///
-/// 无用 = 所有 ToolResult 内容都是空文本（无任何实际结果）。
-/// - 含用户文本的消息 → 有用（保留）
-/// - 含图片结果 → 有用（保留）  
-/// - ToolResult 为空或全是空字符串 → 无用（丢弃）
-fn is_useless_tool_result(msg: &Message) -> bool {
+/// 丢弃：ToolCall、ToolResult、Reasoning、Image 等所有非纯文本内容。
+/// 过滤后无文本返回 `None`，表示整条消息应丢弃。
+fn keep_only_text(msg: &Message) -> Option<Message> {
     match msg {
         Message::User { content } => {
-            // 如果消息里有用户自己的文本（非 ToolResult），说明不是纯工具结果，保留
-            let has_user_text = content
+            let texts: Vec<String> = content
                 .iter()
-                .any(|c| matches!(c, UserContent::Text(t) if !t.text.trim().is_empty()));
-            if has_user_text {
-                return false;
+                .filter_map(|c| match c {
+                    UserContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect();
+            if texts.is_empty() {
+                None
+            } else {
+                Some(Message::User {
+                    content: rig::one_or_many::OneOrMany::one(UserContent::text(texts.join("\n"))),
+                })
             }
-            // 检查是否所有 ToolResult 内容都为空文本
-            let all_tool_results = content
-                .iter()
-                .all(|c| matches!(c, UserContent::ToolResult(_)));
-            if !all_tool_results {
-                // 有其他类型内容（Image/Audio/Video/Document），视为有用
-                return false;
-            }
-            // 所有内容都是 ToolResult，且至少有一个非空的才算有用
-            !content.iter().any(|c| match c {
-                UserContent::ToolResult(tr) => tr.content.iter().any(|tc| match tc {
-                    ToolResultContent::Text(t) => !t.text.trim().is_empty(),
-                    ToolResultContent::Image(_) => true, // 图片结果视为有用
-                }),
-                _ => false,
-            })
-            // 注意：如果 content 为空（没有 ToolResult），那走不到这里，已被 is_message_empty 拦截
         }
-        _ => false,
+        Message::Assistant { content, .. } => {
+            let texts: Vec<String> = content
+                .iter()
+                .filter_map(|c| match c {
+                    AssistantContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect();
+            if texts.is_empty() {
+                None
+            } else {
+                Some(Message::Assistant {
+                    id: None,
+                    content: rig::one_or_many::OneOrMany::one(AssistantContent::text(
+                        texts.join("\n"),
+                    )),
+                })
+            }
+        }
+        Message::System { .. } => Some(msg.clone()),
     }
 }
 
@@ -325,18 +287,8 @@ fn truncate_message_texts(msg: &mut Message) {
         }
         Message::User { content } => {
             for c in content.iter_mut() {
-                match c {
-                    UserContent::Text(t) => {
-                        truncate_str(&mut t.text, "文本");
-                    }
-                    UserContent::ToolResult(tr) => {
-                        for tc in tr.content.iter_mut() {
-                            if let ToolResultContent::Text(t) = tc {
-                                truncate_str(&mut t.text, "工具结果");
-                            }
-                        }
-                    }
-                    _ => {}
+                if let UserContent::Text(t) = c {
+                    truncate_str(&mut t.text, "文本");
                 }
             }
         }
@@ -388,7 +340,6 @@ fn format_messages_for_summary(messages: &[Message]) -> String {
                     .filter_map(|c| match c {
                         AssistantContent::Text(t) => Some(t.text.clone()),
                         AssistantContent::Reasoning(r) => Some(r.display_text()),
-                        AssistantContent::ToolCall(tc) => Some(tc.function.name.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -498,23 +449,23 @@ fn load_history() -> Result<(Vec<Message>, Option<String>)> {
     }
 
     // 尝试新格式，失败则回退到旧格式（纯消息数组）
-    let history: HistoryFile = serde_json::from_str(&json).unwrap_or_else(|e| {
-        tracing::warn!("历史文件格式不兼容，尝试旧格式: {e}");
-        HistoryFile {
-            summary: None,
-            messages: serde_json::from_str(&json).unwrap_or_default(),
+    match serde_json::from_str::<HistoryFile>(&json) {
+        Ok(h) => {
+            tracing::debug!(
+                "从 {} 加载了 {} 条历史消息",
+                path.display(),
+                h.messages.len()
+            );
+            Ok((h.messages, h.summary))
         }
-    });
-
-    tracing::debug!(
-        "从 {} 加载了 {} 条历史消息, 摘要: {}",
-        path.display(),
-        history.messages.len(),
-        if history.summary.is_some() {
-            "有"
-        } else {
-            "无"
+        Err(_) => {
+            let messages: Vec<Message> = serde_json::from_str(&json)?;
+            tracing::debug!(
+                "从 {} 加载了 {} 条历史消息（旧格式）",
+                path.display(),
+                messages.len()
+            );
+            Ok((messages, None))
         }
-    );
-    Ok((history.messages, history.summary))
+    }
 }

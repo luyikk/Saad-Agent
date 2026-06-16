@@ -108,12 +108,12 @@ async fn main() -> Result<()> {
 /// 初始化 tracing 日志系统
 fn init_tracing() {
     let filter_layer = tracing_subscriber::filter::Targets::new()
-        .with_default(tracing::Level::TRACE)
+        .with_default(tracing::Level::INFO)
         .with_target("reqwest", LevelFilter::WARN)
         .with_target("hyper_util", LevelFilter::WARN)
         .with_target("h2", LevelFilter::WARN)
-        .with_target("rig", LevelFilter::WARN)
-        .with_target("saad_agent", LevelFilter::TRACE);
+        .with_target("rig", LevelFilter::WARN);
+    //.with_target("saad_agent", LevelFilter::TRACE);
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .pretty()

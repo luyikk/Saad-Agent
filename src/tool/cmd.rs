@@ -5,7 +5,6 @@
 /// 在 Windows 上使用 `encoding_rs` 智能处理 GBK/UTF-8 编码转换。
 use std::sync::OnceLock;
 
-use console::style;
 use encoding_rs::GBK;
 use regex::Regex;
 use rig::completion::ToolDefinition;
@@ -15,7 +14,6 @@ use serde_json::json;
 use std::collections::HashSet;
 
 use crate::error::AgentError;
-use crate::ui;
 
 /// 缓存的 PowerShell 版本检测结果：`true` 表示 pwsh 可用
 static PW_SH_AVAILABLE: OnceLock<bool> = OnceLock::new();
@@ -64,7 +62,7 @@ impl Tool for RunCmd {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let cmdline = args.command;
 
-        // 安全检查：检测危险模式，弹框让用户确认
+        // 安全检查：检测危险模式，弹框让用户确认（四级权限选择）
         confirm_dangerous_command(&cmdline)?;
 
         // 权限检查
@@ -114,7 +112,12 @@ impl Tool for RunCmd {
 
 /// 检查命令是否包含已知的危险模式。
 ///
-/// 如果匹配到危险模式，弹出确认对话框让用户选择是否继续执行。
+/// 如果匹配到危险模式，通过 `permission::confirm_dangerous` 弹出四级权限选择对话框：
+/// 1. 允许本次执行
+/// 2. 本次会话全部允许
+/// 3. 永久允许（不再询问）
+/// 4. 拒绝
+///
 /// 用户拒绝时返回错误。
 fn confirm_dangerous_command(cmd: &str) -> Result<(), AgentError> {
     let reason = match detect_dangerous_pattern(cmd) {
@@ -122,30 +125,7 @@ fn confirm_dangerous_command(cmd: &str) -> Result<(), AgentError> {
         None => return Ok(()),
     };
 
-    ui::print_spacer();
-    println!(
-        "{} {}",
-        style("⚠").yellow().bold(),
-        style("安全警告：检测到潜在危险操作").yellow().bold()
-    );
-    println!("  {}", style(&reason).yellow());
-    println!("  {} {}", style("📋 命令:").dim(), style(cmd).white());
-    ui::print_spacer();
-
-    let confirmed = dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
-        .with_prompt("确认执行此命令吗？")
-        .default(false)
-        .interact()
-        .map_err(|e| AgentError::Other(format!("无法读取用户输入: {e}")))?;
-
-    if confirmed {
-        tracing::warn!("用户确认执行危险命令: {cmd}");
-        Ok(())
-    } else {
-        Err(AgentError::Other(format!(
-            "🚫 用户拒绝了危险命令的执行\n   原因: {reason}\n   命令: {cmd}"
-        )))
-    }
+    crate::permission::confirm_dangerous(&reason, cmd)
 }
 
 /// 检测命令是否匹配危险模式，返回危险原因描述
@@ -282,6 +262,7 @@ fn detect_dangerous_pattern(cmd: &str) -> Option<String> {
         "ConvertTo-Json",
         "ConvertFrom-Json",
         "Get-Content",
+        "Get-ChildItem",
         "Set-Location",
     ]
     .iter()
@@ -300,7 +281,7 @@ fn detect_dangerous_pattern(cmd: &str) -> Option<String> {
 
         // 提取基础命令名称，兼容绝对路径（如 /usr/bin/rm）
         let base_cmd = sub_cmd.split_whitespace().next().unwrap_or("");
-        let cmd_name = base_cmd.split('/').last().unwrap_or("");
+        let cmd_name = base_cmd.split('/').next_back().unwrap_or("");
 
         if !cmd_name.is_empty() && !allowed_commands.contains(cmd_name) {
             return Some(format!("子命令 \"{}\" 不在允许执行的白名单中", cmd_name));
