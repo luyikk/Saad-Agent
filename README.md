@@ -142,4 +142,6 @@ cargo run            # 构建并运行
 
 ## 许可证
 
-MIT
+本项目采用 [MIT License](LICENSE) 开源。
+
+© 2025 Saad

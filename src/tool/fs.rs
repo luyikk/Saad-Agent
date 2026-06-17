@@ -424,8 +424,11 @@ impl Tool for EditFile {
                 // 展示冲突位置以帮助 AI 修正
                 let mut hints = Vec::new();
                 for (i, &pos) in matches.iter().take(5).enumerate() {
-                    let start = pos.saturating_sub(40);
-                    let end = (pos + args.old_string.len() + 40).min(content.len());
+                    let raw_start = pos.saturating_sub(40);
+                    let raw_end = (pos + args.old_string.len() + 40).min(content.len());
+                    // 确保切片落在 UTF-8 字符边界上，避免在多字节字符（如中文）中间切片导致 panic
+                    let start = content.floor_char_boundary(raw_start);
+                    let end = content.ceil_char_boundary(raw_end);
                     let snippet = &content[start..end];
                     hints.push(format!("  [{}] ...{}...", i + 1, snippet));
                 }
