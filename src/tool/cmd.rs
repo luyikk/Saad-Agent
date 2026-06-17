@@ -25,10 +25,10 @@ pub struct OperationArgs {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct RunCmd;
+pub struct ExecuteCommand;
 
-impl Tool for RunCmd {
-    const NAME: &'static str = "RunCmd";
+impl Tool for ExecuteCommand {
+    const NAME: &'static str = "ExecuteCommand";
 
     type Error = AgentError;
     type Args = OperationArgs;
@@ -36,7 +36,7 @@ impl Tool for RunCmd {
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
-            name: "RunCmd".to_string(),
+            name: "ExecuteCommand".to_string(),
             description:
                 r#"在本地操作系统中安全地执行完整的命令行语句。支持跨平台 (Windows/Linux/macOS)。
 【⚠️ 关键】command 必须是完整且可直接执行的单行命令字符串，已包含所有参数。

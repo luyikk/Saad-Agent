@@ -158,7 +158,7 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
         【可用工具（仅限以下三种，没有其他工具）】
         - ReadFile：读取指定路径的文件内容，返回带行号的内容
         - WriteFile：覆盖写入指定路径的文件（⚠️ 会覆盖已有内容）
-        - RunCmd：执行完整的命令行语句，支持 Windows/Linux/macOS
+        - ExecuteCommand：执行完整的命令行语句，支持 Windows/Linux/macOS
         重要提示：没有 Edit 工具。如需修改文件，请用 ReadFile 读取内容，在你的回答中修改，再用 WriteFile 完整覆盖写回。
 
         【注意事项】
@@ -184,7 +184,7 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
         .default_max_turns(config::get_max_turns())
         .temperature(config::DEFAULT_TEMPERATURE)
         .max_tokens(effort.max_tokens() as u64)
-        .tool(tool::cmd::RunCmd)
+        .tool(tool::cmd::ExecuteCommand)
         .tool(tool::fs::ReadFile)
         .tool(tool::fs::WriteFile)
         .tool(tool::fs::EditFile)
