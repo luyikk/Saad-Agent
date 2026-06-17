@@ -127,6 +127,12 @@ pub async fn handle_command(
                     style(memory.len()).yellow(),
                     max_history
                 );
+                if let Some(s) = memory.summary() {
+                    let preview: String = s.chars().take(120).collect();
+                    let suffix = if s.chars().count() > 120 { "..." } else { "" };
+                    println!("   摘要: {}{}", style(preview).yellow(), style(suffix).dim());
+                }
+
                 let start = if memory.len() > 5 {
                     memory.len() - 5
                 } else {

@@ -234,7 +234,8 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
     let mut notes = vec![
         "- 所有相对路径都基于上述工作目录",
         "- 在执行命令或读写文件时，优先使用绝对路径",
-        "- 如果不确定某个文件的位置，请先使用 FindFile 查找",
+        "- 如果不确定某个文件的位置，请先使用 FindFile 工具查找",
+        "- 修改文件优先使用 EditFile 工具，避免覆盖重要文件",
         "- 如果创建了临时文件用于某个命令，执行完后请及时删除以免混乱",
     ];
 
