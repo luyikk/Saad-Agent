@@ -80,7 +80,7 @@ impl EffortLevel {
 
     pub fn max_tokens(&self) -> usize {
         match self {
-            Self::Concise => 4_096,
+            Self::Concise => get_max_tokens(),
             Self::Normal => get_max_tokens(),
             Self::Elaborate => get_max_tokens(),
         }
