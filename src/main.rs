@@ -234,7 +234,7 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
     let mut notes = vec![
         "- 所有相对路径都基于上述工作目录",
         "- 在执行命令或读写文件时，优先使用绝对路径",
-        "- 如果不确定某个文件的位置，先用 Get-ChildItem / ls 探索目录结构",
+        "- 如果不确定某个文件的位置，请先使用 FindFile 查找",
         "- 如果创建了临时文件用于某个命令，执行完后请及时删除以免混乱",
     ];
 
@@ -252,22 +252,6 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
 
         【当前工作目录】
         {}
-
-        【可用工具】
-        - ReadFile：读取指定路径的文件内容，返回带行号的内容
-        - WriteFile：覆盖写入指定路径的文件（⚠️ 会覆盖已有内容）
-        - EditFile：精确编辑文件，查找并替换指定文本片段（old_string 必须唯一匹配）
-        - GetFileLines：获取文件总行数，用于评估文件规模
-        - ExecuteCommand：执行完整的命令行语句，支持 Windows/Linux/macOS
-
-        【变更策略 ⚠️ 必须遵守】
-        每次修改代码前，必须先在回答中列出变更计划：
-        1. 说明要修改哪些文件
-        2. 每个文件的修改目的和内容概述
-        3. 预估修改步骤数
-
-        修改过程中逐步骤报告进度（如 "✅ 步骤 1/3: 已完成 xxx"）。
-        全部修改完成后，总结实际变更内容。
 
         【注意事项】
         {}
@@ -297,6 +281,7 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
         .tool(tool::fs::WriteFile)
         .tool(tool::fs::EditFile)
         .tool(tool::fs::GetFileLines)
+        .tool(tool::fs::FindFile)
         .build()
 }
 

@@ -5,6 +5,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -32,18 +33,18 @@ use crate::permission;
 /// # 错误
 /// - 路径不存在时无法 canonicalize
 /// - 用户拒绝了越权访问
-fn resolve_safe_path(requested: &str) -> Result<PathBuf, AgentError> {
+async fn resolve_safe_path(requested: &str) -> Result<PathBuf, AgentError> {
     let cwd =
         std::env::current_dir().map_err(|e| AgentError::Other(format!("无法获取当前目录: {e}")))?;
 
-    let cwd_clean = cwd
-        .canonicalize()
+    let cwd_clean = tokio::fs::canonicalize(&cwd)
+        .await
         .map_err(|e| AgentError::Other(format!("无法规范化当前目录: {e}")))?;
 
     let candidate = cwd.join(requested);
 
     // 尝试 canonicalize（路径必须存在）
-    let resolved = candidate.canonicalize().map_err(|e| {
+    let resolved = tokio::fs::canonicalize(&candidate).await.map_err(|e| {
         AgentError::Other(format!(
             "无法解析路径 '{requested}': {e}\n   提示: 请使用已存在的路径，或使用 WriteFile 创建新文件"
         ))
@@ -63,20 +64,20 @@ fn resolve_safe_path(requested: &str) -> Result<PathBuf, AgentError> {
 }
 
 /// 为写入操作解析路径（允许目标文件尚不存在，但父目录必须在工作目录内）
-fn resolve_safe_path_for_write(requested: &str) -> Result<PathBuf, AgentError> {
+async fn resolve_safe_path_for_write(requested: &str) -> Result<PathBuf, AgentError> {
     let cwd =
         std::env::current_dir().map_err(|e| AgentError::Other(format!("无法获取当前目录: {e}")))?;
 
-    let cwd_clean = cwd
-        .canonicalize()
+    let cwd_clean = tokio::fs::canonicalize(&cwd)
+        .await
         .map_err(|e| AgentError::Other(format!("无法规范化当前目录: {e}")))?;
 
     let candidate = cwd.join(requested);
 
     // 如果文件已存在，直接 canonicalize 并检查
-    if candidate.exists() {
-        let resolved = candidate
-            .canonicalize()
+    if tokio::fs::metadata(&candidate).await.is_ok() {
+        let resolved = tokio::fs::canonicalize(&candidate)
+            .await
             .map_err(|e| AgentError::Other(format!("无法解析路径 '{requested}': {e}")))?;
         if !resolved.starts_with(&cwd_clean) {
             let msg = format!(
@@ -105,9 +106,9 @@ fn resolve_safe_path_for_write(requested: &str) -> Result<PathBuf, AgentError> {
                 return Ok(candidate);
             }
             Some(parent) => {
-                if parent.exists() {
-                    let resolved_parent = parent
-                        .canonicalize()
+                if tokio::fs::metadata(parent).await.is_ok() {
+                    let resolved_parent = tokio::fs::canonicalize(parent)
+                        .await
                         .map_err(|e| AgentError::Other(format!("无法解析父目录: {e}")))?;
                     if !resolved_parent.starts_with(&cwd_clean) {
                         let msg = format!(
@@ -189,7 +190,7 @@ impl Tool for ReadFile {
         let max_lines = args.max_lines.unwrap_or(500);
 
         // 路径安全校验
-        let safe_path = resolve_safe_path(&args.path)?;
+        let safe_path = resolve_safe_path(&args.path).await?;
 
         let content = tokio::fs::read_to_string(&safe_path).await.map_err(|e| {
             AgentError::Other(format!("无法读取文件 '{}': {e}", safe_path.display()))
@@ -297,7 +298,7 @@ impl Tool for WriteFile {
         crate::permission::confirm_file_write(&args.path)?;
 
         // 路径安全校验（检测到越权会弹框确认）
-        let safe_path = resolve_safe_path_for_write(&args.path)?;
+        let safe_path = resolve_safe_path_for_write(&args.path).await?;
 
         // 确保父目录存在
         if let Some(parent) = safe_path.parent() {
@@ -389,7 +390,7 @@ impl Tool for EditFile {
         crate::permission::confirm_file_write(&args.path)?;
 
         // 路径安全校验
-        let safe_path = resolve_safe_path(&args.path)?;
+        let safe_path = resolve_safe_path(&args.path).await?;
 
         tracing::trace!(
             "编辑文件: {}，old: {} 字节，new: {} 字节",
@@ -507,7 +508,7 @@ impl Tool for GetFileLines {
 
     #[tracing::instrument(level = "trace", ret)]
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let safe_path = resolve_safe_path(&args.path)?;
+        let safe_path = resolve_safe_path(&args.path).await?;
 
         let content = tokio::fs::read_to_string(&safe_path).await.map_err(|e| {
             AgentError::Other(format!("无法读取文件 '{}': {e}", safe_path.display()))
@@ -516,5 +517,129 @@ impl Tool for GetFileLines {
         let total = content.lines().count();
 
         Ok(format!("文件: {}\n总行数: {total}", safe_path.display(),))
+    }
+}
+
+// ============================================================
+// FindFile
+// ============================================================
+
+#[derive(Deserialize, Debug)]
+pub struct FindFileArgs {
+    /// 正则表达式模式，匹配文件相对路径
+    pub pattern: String,
+    /// 可选：最大搜索深度，默认 10
+    pub max_depth: Option<usize>,
+    /// 可选：最大返回结果数，默认 50
+    pub max_results: Option<usize>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct FindFile;
+
+impl Tool for FindFile {
+    const NAME: &'static str = "FindFile";
+
+    type Error = AgentError;
+    type Args = FindFileArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "FindFile".to_string(),
+            description: "在当前工作目录下递归搜索文件，返回匹配正则表达式的文件路径列表。用于快速定位不知道确切路径的文件。"
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "正则表达式模式，用于匹配文件相对路径。例如 'main\\.rs$' 匹配 main.rs，'fs\\.rs' 匹配路径中包含 fs.rs 的文件，'\\.toml$' 匹配所有 toml 文件"
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "最大搜索深度（目录层数），默认 10"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "最大返回结果数，默认 50"
+                    }
+                },
+                "required": ["pattern"],
+            }),
+        }
+    }
+
+    #[tracing::instrument(level = "trace", ret)]
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let max_depth = args.max_depth.unwrap_or(10);
+        let max_results = args.max_results.unwrap_or(50);
+
+        let re = Regex::new(&args.pattern)
+            .map_err(|e| AgentError::Other(format!("无效的正则表达式 '{}': {e}", args.pattern)))?;
+
+        let cwd = std::env::current_dir()
+            .map_err(|e| AgentError::Other(format!("无法获取当前目录: {e}")))?;
+
+        let mut results: Vec<PathBuf> = Vec::new();
+        walk_dir(&cwd, &cwd, &re, max_depth, max_results, &mut results);
+
+        if results.is_empty() {
+            return Ok(format!("未找到匹配 '{}' 的文件", args.pattern));
+        }
+
+        let mut output = format!("找到 {} 个匹配 '{}' 的文件:\n", results.len(), args.pattern);
+        for path in &results {
+            if let Ok(rel) = path.strip_prefix(&cwd) {
+                let _ = writeln!(output, "  {}", rel.display());
+            }
+        }
+
+        Ok(output)
+    }
+}
+
+/// 递归遍历目录，收集匹配正则表达式的文件路径
+fn walk_dir(
+    base: &Path,
+    dir: &Path,
+    pattern: &Regex,
+    max_depth: usize,
+    max_results: usize,
+    results: &mut Vec<PathBuf>,
+) {
+    if max_depth == 0 || results.len() >= max_results {
+        return;
+    }
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        if results.len() >= max_results {
+            return;
+        }
+
+        let file_name = entry.file_name();
+
+        // 跳过隐藏文件和目录
+        if file_name.to_str().is_some_and(|n| n.starts_with('.')) {
+            continue;
+        }
+
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+
+        if file_type.is_dir() {
+            walk_dir(base, &entry.path(), pattern, max_depth - 1, max_results, results);
+        } else if let Ok(rel) = entry.path().strip_prefix(base) {
+            if pattern.is_match(&rel.to_string_lossy()) {
+                results.push(entry.path());
+            }
+        }
     }
 }
