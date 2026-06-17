@@ -6,6 +6,7 @@
 use std::io::Write;
 
 use anyhow::Result;
+use clap::Parser;
 use console::style;
 use rig::prelude::*;
 use rig::providers::deepseek;
@@ -19,9 +20,27 @@ mod config;
 mod error;
 mod memory;
 mod permission;
+mod session;
 mod stream_handler;
 mod tool;
 mod ui;
+
+/// CLI 参数
+#[derive(Parser)]
+#[command(name = "saad", about = "AI 编程助手")]
+struct Cli {
+    /// 继续最近一次对话
+    #[arg(short = 'c', long = "continue", conflicts_with_all = ["resume", "session_id"])]
+    continue_last: bool,
+
+    /// 交互式选择并恢复历史对话
+    #[arg(short = 'r', long = "resume", conflicts_with_all = ["continue_last", "session_id"])]
+    resume: bool,
+
+    /// 通过 Session ID 精确恢复某次对话
+    #[arg(long = "session-id", conflicts_with_all = ["continue_last", "resume"])]
+    session_id: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,20 +48,89 @@ async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     permission::load_permanent_permission();
 
+    let cli = Cli::parse();
+
     // ---- 构建 AI Agent ----
     let api_key = config::get_api_key().map_err(|e| anyhow::anyhow!(e))?;
     let client = deepseek::Client::new(&api_key)?;
     let mut agent = build_agent(&client);
 
-    // ---- 加载对话历史 ----
+    // ---- 打开数据库 ----
+    let pool = session::open_db().await?;
+
     let max_history = config::get_max_history_messages();
-    let (loaded_messages, loaded_summary) = memory::ConversationMemory::load_from_disk()
-        .unwrap_or_else(|e| {
-            tracing::warn!("加载对话历史失败: {}，将使用全新对话", e);
-            (vec![], None)
-        });
-    let mut memory =
-        memory::ConversationMemory::from_parts(loaded_messages, loaded_summary, max_history);
+
+    // ---- 路由：根据 CLI 参数加载或创建 session ----
+    let mut memory = if let Some(ref sid) = cli.session_id {
+        // --session-id <id>
+        match session::load(&pool, sid).await {
+            Ok((messages, summary, title)) => {
+                ui::print_info(&format!("已恢复 session: {sid}"));
+                memory::ConversationMemory::from_parts(
+                    messages,
+                    summary,
+                    max_history,
+                    sid.clone(),
+                    title,
+                )
+            }
+            Err(e) => {
+                anyhow::bail!("无法加载 session {sid}: {e}");
+            }
+        }
+    } else if cli.continue_last {
+        // -c / --continue
+        match session::most_recent(&pool).await? {
+            Some(meta) => {
+                let (messages, summary, title) = session::load(&pool, &meta.id).await?;
+                ui::print_info(&format!("继续上次对话: {} — {}", meta.id, meta.title));
+                memory::ConversationMemory::from_parts(
+                    messages,
+                    summary,
+                    max_history,
+                    meta.id,
+                    title,
+                )
+            }
+            None => {
+                ui::print_info("没有历史对话记录，开始全新对话");
+                let sid = session::generate_id();
+                memory::ConversationMemory::new(max_history, sid, String::new())
+            }
+        }
+    } else if cli.resume {
+        // -r / --resume
+        let sessions = session::list_all(&pool).await?;
+        if sessions.is_empty() {
+            anyhow::bail!("没有可恢复的对话记录。直接运行 'saad' 开始新对话。");
+        }
+
+        let items: Vec<String> = sessions
+            .iter()
+            .map(|s| format!("{} — {} ({} 条消息)", s.id, s.title, s.msg_count))
+            .collect();
+
+        let selection = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+            .with_prompt("选择要恢复的对话")
+            .items(&items)
+            .default(0)
+            .interact()
+            .map_err(|e| anyhow::anyhow!("交互选择失败: {e}"))?;
+
+        let meta = &sessions[selection];
+        let (messages, summary, title) = session::load(&pool, &meta.id).await?;
+        memory::ConversationMemory::from_parts(
+            messages,
+            summary,
+            max_history,
+            meta.id.clone(),
+            title,
+        )
+    } else {
+        // 默认：全新 session
+        let sid = session::generate_id();
+        memory::ConversationMemory::new(max_history, sid, String::new())
+    };
 
     // ---- 欢迎界面 ----
     ui::print_welcome(memory.len());
@@ -57,7 +145,7 @@ async fn main() -> Result<()> {
         std::io::stdout().flush()?;
 
         let Some(prompt) = read_input(&mut reader).await else {
-            save_and_exit(&memory)
+            save_and_exit(&pool, &memory).await
         };
 
         if prompt.is_empty() {
@@ -66,7 +154,7 @@ async fn main() -> Result<()> {
 
         // 内置斜杠命令
         if prompt.starts_with('/') {
-            match command::handle_command(&prompt, &mut memory, max_history)? {
+            match command::handle_command(&prompt, &mut memory, max_history, &pool).await? {
                 command::CommandResult::Exit => break,
                 command::CommandResult::RebuildAgent => {
                     agent = build_agent(&client);
@@ -76,12 +164,18 @@ async fn main() -> Result<()> {
             continue;
         }
 
+        // 首条用户 prompt 作为 session 标题
+        if memory.title.is_empty() {
+            let chars: Vec<char> = prompt.chars().take(80).collect();
+            memory.title = chars.into_iter().collect();
+        }
+
         // 构建上下文消息（摘要 + 当前消息）
         let context = memory.build_context();
 
         // ---- 发送消息并流式输出 ----
         tracing::debug!("发送消息 (历史长度: {})", context.len());
-        let mut display = ui::StreamDisplay::new(100);
+        let mut display = ui::StreamDisplay::new(config::get_max_turns());
 
         let final_res = stream_handler::process_stream(
             &prompt,
@@ -98,6 +192,9 @@ async fn main() -> Result<()> {
         // 智能压缩（超过 max_history 时用 AI 摘要）
         let compact_model = client.completion_model(config::get_model_name());
         memory.compact(&compact_model).await?;
+
+        // 每轮对话后自动保存
+        save_session_to_db(&pool, &memory).await;
     }
 
     std::process::exit(0);
@@ -239,13 +336,34 @@ async fn read_input(reader: &mut tokio::io::BufReader<tokio::io::Stdin>) -> Opti
     }
 }
 
-/// 保存历史并优雅退出
-fn save_and_exit(mem: &memory::ConversationMemory) -> ! {
-    if !mem.is_empty() {
-        if let Err(e) = mem.save_to_disk() {
-            tracing::warn!("保存对话历史失败: {}", e);
-        }
+/// 保存当前 session 到数据库（忽略错误，仅打日志）
+async fn save_session_to_db(pool: &sqlx::SqlitePool, mem: &memory::ConversationMemory) {
+    if mem.is_empty() {
+        return;
     }
+    let messages_json = match serde_json::to_string(mem.messages()) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("序列化消息失败: {e}");
+            return;
+        }
+    };
+    if let Err(e) = session::save(
+        pool,
+        &mem.session_id,
+        &mem.title,
+        mem.summary(),
+        &messages_json,
+    )
+    .await
+    {
+        tracing::warn!("保存 session 失败: {e}");
+    }
+}
+
+/// 保存历史并优雅退出
+async fn save_and_exit(pool: &sqlx::SqlitePool, mem: &memory::ConversationMemory) -> ! {
+    save_session_to_db(pool, mem).await;
     ui::print_goodbye(!mem.is_empty());
     std::process::exit(0);
 }

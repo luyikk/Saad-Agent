@@ -147,7 +147,7 @@ pub fn perm_config_path() -> PathBuf {
     PathBuf::from(".saad-agent").join("permission.toml")
 }
 
-/// 对话历史文件路径
-pub fn history_path() -> PathBuf {
-    PathBuf::from(".saad-agent").join("history.json")
+/// Session 数据库路径
+pub fn db_path() -> PathBuf {
+    PathBuf::from(".saad-agent").join("sessions.db")
 }

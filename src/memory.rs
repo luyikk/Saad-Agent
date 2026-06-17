@@ -7,8 +7,6 @@ use anyhow::Result;
 use rig::completion::{AssistantContent, CompletionModel};
 use rig::message::{Message, UserContent};
 
-use crate::config;
-
 // ============================================================
 // ConversationMemory
 // ============================================================
@@ -21,32 +19,41 @@ pub struct ConversationMemory {
     messages: Vec<Message>,
     max_messages: usize,
     summary: Option<String>,
+    /// 当前 session 的唯一 ID
+    pub session_id: String,
+    /// session 标题（首条用户 prompt）
+    pub title: String,
 }
 
 /// 单条工具结果/消息文本的最大字符数（超过则截断以节省 token）
 const MAX_MESSAGE_CHARS: usize = 4000;
 
 impl ConversationMemory {
-    /// 创建新的记忆体
-    #[allow(dead_code)]
-    pub fn new(max_messages: usize) -> Self {
+    /// 创建新记忆体
+    pub fn new(max_messages: usize, session_id: String, title: String) -> Self {
         Self {
             messages: Vec::new(),
             max_messages,
             summary: None,
+            session_id,
+            title,
         }
     }
 
-    /// 从已有消息列表创建（用于加载历史）
+    /// 从已有消息列表创建（用于从 DB 恢复 session）
     pub fn from_parts(
         messages: Vec<Message>,
         summary: Option<String>,
         max_messages: usize,
+        session_id: String,
+        title: String,
     ) -> Self {
         Self {
             messages,
             max_messages,
             summary,
+            session_id,
+            title,
         }
     }
 
@@ -78,6 +85,7 @@ impl ConversationMemory {
     pub fn clear(&mut self) {
         self.messages.clear();
         self.summary = None;
+        // 保留 session_id 和 title
     }
 
     /// 扩展消息历史，只保留纯文本聊天记录：
@@ -194,7 +202,6 @@ impl ConversationMemory {
 
                 // ✅ 摘要成功后，安全移除旧消息
                 self.messages.drain(..split_at);
-                self.save_to_disk()?;
                 Ok(true)
             }
             Err(e) => {
@@ -212,23 +219,7 @@ impl ConversationMemory {
             }
         }
     }
-
-    // ── 持久化 ──
-
-    /// 保存当前消息和摘要到 JSON 文件
-    pub fn save_to_disk(&self) -> Result<()> {
-        save_history(&self.messages, self.summary.as_deref())
-    }
-
-    /// 从 JSON 文件加载历史消息，返回摘要文本
-    pub fn load_from_disk() -> Result<(Vec<Message>, Option<String>)> {
-        load_history()
-    }
 }
-
-// ============================================================
-// extend 辅助: 剥离工具内容
-// ============================================================
 
 // ============================================================
 // extend 辅助: 消息过滤与截断
@@ -405,67 +396,5 @@ pub const fn message_role_name(msg: &Message) -> &'static str {
         Message::System { .. } => "system",
         Message::User { .. } => "user",
         Message::Assistant { .. } => "assistant",
-    }
-}
-
-// ============================================================
-// 持久化 I/O
-// ============================================================
-
-/// 保存对话历史到 JSON 文件
-pub fn save_history(messages: &[Message], summary: Option<&str>) -> Result<()> {
-    let path = config::history_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    #[derive(serde::Serialize)]
-    struct HistoryFile<'a> {
-        summary: Option<&'a str>,
-        messages: &'a [Message],
-    }
-    let file = HistoryFile { summary, messages };
-    let json = serde_json::to_string_pretty(&file)?;
-    std::fs::write(&path, json)?;
-    tracing::debug!(
-        "对话历史已保存到: {} ({} 条消息)",
-        path.display(),
-        messages.len()
-    );
-    Ok(())
-}
-
-/// 从 JSON 文件加载对话历史和摘要
-fn load_history() -> Result<(Vec<Message>, Option<String>)> {
-    let path = config::history_path();
-    if !path.exists() {
-        return Ok((vec![], None));
-    }
-    let json = std::fs::read_to_string(&path)?;
-
-    #[derive(serde::Deserialize)]
-    struct HistoryFile {
-        summary: Option<String>,
-        messages: Vec<Message>,
-    }
-
-    // 尝试新格式，失败则回退到旧格式（纯消息数组）
-    match serde_json::from_str::<HistoryFile>(&json) {
-        Ok(h) => {
-            tracing::debug!(
-                "从 {} 加载了 {} 条历史消息",
-                path.display(),
-                h.messages.len()
-            );
-            Ok((h.messages, h.summary))
-        }
-        Err(_) => {
-            let messages: Vec<Message> = serde_json::from_str(&json)?;
-            tracing::debug!(
-                "从 {} 加载了 {} 条历史消息（旧格式）",
-                path.display(),
-                messages.len()
-            );
-            Ok((messages, None))
-        }
     }
 }

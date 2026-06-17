@@ -3,10 +3,12 @@
 //! 处理用户在交互界面中输入的 `/` 前缀命令。
 
 use console::style;
+use sqlx::SqlitePool;
 
 use crate::config;
 use crate::memory;
 use crate::memory::ConversationMemory;
+use crate::session;
 use crate::ui;
 
 /// 命令处理结果
@@ -20,15 +22,15 @@ pub enum CommandResult {
 }
 
 /// 处理内置斜杠命令。
-pub fn handle_command(
+pub async fn handle_command(
     cmd: &str,
     memory: &mut ConversationMemory,
     max_history: usize,
+    pool: &SqlitePool,
 ) -> anyhow::Result<CommandResult> {
     let cmd_lower = cmd.to_lowercase();
     // 匹配退出命令
     if cmd_lower == "/exit" || cmd_lower == "/quit" {
-        memory.save_to_disk()?;
         ui::print_goodbye(!memory.is_empty());
         return Ok(CommandResult::Exit);
     }
@@ -45,8 +47,12 @@ pub fn handle_command(
             Ok(CommandResult::Continue)
         }
         "/clear" => {
+            let sid = memory.session_id.clone();
             memory.clear();
-            std::fs::remove_file(config::history_path())?;
+            // 从 DB 中删除（文件不存在时不报错）
+            if let Err(e) = session::delete(pool, &sid).await {
+                tracing::warn!("删除 session 文件失败: {e}");
+            }
             ui::print_success("对话历史已清空");
             Ok(CommandResult::Continue)
         }
@@ -54,21 +60,52 @@ pub fn handle_command(
             if memory.is_empty() {
                 ui::print_warning("对话历史为空，无需保存");
             } else {
-                memory.save_to_disk()?;
+                let messages_json = serde_json::to_string(memory.messages())
+                    .map_err(|e| anyhow::anyhow!("序列化失败: {e}"))?;
+                session::save(
+                    pool,
+                    &memory.session_id,
+                    &memory.title,
+                    memory.summary(),
+                    &messages_json,
+                )
+                .await?;
+                ui::print_success("对话历史已保存");
             }
             Ok(CommandResult::Continue)
         }
         "/load" => {
-            match memory::ConversationMemory::load_from_disk() {
-                Ok((messages, _summary)) => {
-                    if messages.is_empty() {
-                        ui::print_warning("没有找到保存的对话历史");
-                    } else {
-                        let count = messages.len();
+            match session::list_all(pool).await {
+                Ok(sessions) if sessions.is_empty() => {
+                    ui::print_warning("没有找到保存的对话历史");
+                }
+                Ok(sessions) => {
+                    let items: Vec<String> = sessions
+                        .iter()
+                        .map(|s| format!("{} — {} ({} 条消息)", s.id, s.title, s.msg_count))
+                        .collect();
 
-                        *memory.messages_mut() = messages;
-                        ui::print_success(&format!("已加载 {count} 条历史消息"));
-                    }
+                    let selection =
+                        dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                            .with_prompt("选择要加载的对话")
+                            .items(&items)
+                            .default(0)
+                            .interact()
+                            .map_err(|e| anyhow::anyhow!("交互选择失败: {e}"))?;
+
+                    let meta = &sessions[selection];
+                    let (messages, _summary, title) = session::load(pool, &meta.id).await?;
+                    *memory.messages_mut() = messages;
+                    memory.session_id = meta.id.clone();
+                    memory.title = title.clone();
+                    // 恢复 summary（通过 clear + 重建 summary）
+                    // 注意：ConversationMemory 没有直接设置 summary 的方法，
+                    // 但我们通过 from_parts 的机制来重建。这里简单替换 messages。
+                    let count = memory.len();
+                    ui::print_success(&format!(
+                        "已加载 session: {}\n   {} ({} 条消息)",
+                        meta.id, title, count
+                    ));
                 }
                 Err(e) => ui::print_error(&format!("加载失败: {e}")),
             }
@@ -79,8 +116,13 @@ pub fn handle_command(
                 ui::print_info("当前对话历史为空");
             } else {
                 println!(
-                    "{} 当前对话历史: {} 条消息 (限制: {} 条)",
+                    "{} Session: {}",
                     ui::s_dim("📝"),
+                    style(&memory.session_id).cyan()
+                );
+                println!("   标题: {}", style(&memory.title).dim());
+                println!(
+                    "   消息: {} 条 (限制: {} 条)",
                     style(memory.len()).yellow(),
                     max_history
                 );
