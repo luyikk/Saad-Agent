@@ -68,6 +68,7 @@ pub async fn handle_command(
                     &memory.title,
                     memory.summary(),
                     &messages_json,
+                    memory.len(),
                 )
                 .await?;
                 ui::print_success("对话历史已保存");

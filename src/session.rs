@@ -57,7 +57,8 @@ pub async fn open_db() -> Result<SqlitePool> {
             last_updated TEXT NOT NULL,
             title TEXT NOT NULL DEFAULT '',
             summary TEXT NOT NULL DEFAULT '',
-            messages_json TEXT NOT NULL DEFAULT '[]'
+            messages_json TEXT NOT NULL DEFAULT '[]',
+            msg_count INTEGER NOT NULL DEFAULT 0
         )",
     )
     .execute(&pool)
@@ -100,6 +101,7 @@ pub async fn save(
     title: &str,
     summary: Option<&str>,
     messages_json: &str,
+    msg_count: usize,
 ) -> Result<()> {
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let summary = summary.unwrap_or("");
@@ -115,8 +117,8 @@ pub async fn save(
     let created_at = existing.unwrap_or_else(|| now.clone());
 
     sqlx::query(
-        r"INSERT OR REPLACE INTO sessions (id, created_at, last_updated, title, summary, messages_json)
-          VALUES (?, ?, ?, ?, ?, ?)",
+        r"INSERT OR REPLACE INTO sessions (id, created_at, last_updated, title, summary, messages_json, msg_count)
+          VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id)
     .bind(&created_at)
@@ -124,11 +126,12 @@ pub async fn save(
     .bind(title)
     .bind(summary)
     .bind(messages_json)
+    .bind(msg_count as i64)
     .execute(pool)
     .await
     .with_context(|| format!("保存 session {id} 失败"))?;
 
-    tracing::debug!("session {id} 已保存");
+    tracing::debug!("session {id} 已保存 ({msg_count} 条消息)");
     Ok(())
 }
 
@@ -161,8 +164,7 @@ pub async fn load(pool: &SqlitePool, id: &str) -> Result<(Vec<Message>, Option<S
 /// 列出所有 session（按 last_updated DESC），不含 messages 本体
 pub async fn list_all(pool: &SqlitePool) -> Result<Vec<SessionMeta>> {
     let rows = sqlx::query(
-        r"SELECT id, created_at, last_updated, title,
-                 LENGTH(messages_json) AS msg_json_len
+        r"SELECT id, created_at, last_updated, title, msg_count
           FROM sessions
           ORDER BY last_updated DESC",
     )
@@ -172,20 +174,13 @@ pub async fn list_all(pool: &SqlitePool) -> Result<Vec<SessionMeta>> {
 
     let mut sessions = Vec::with_capacity(rows.len());
     for row in rows {
-        // 估算消息数：messages_json 长度 / 平均每条约 500 字节
-        let json_len: i64 = row.get("msg_json_len");
-        let msg_count = if json_len > 0 {
-            (json_len as usize).div_ceil(500).max(1)
-        } else {
-            0
-        };
-
+        let count: i64 = row.get("msg_count");
         sessions.push(SessionMeta {
             id: row.get("id"),
             created_at: row.get("created_at"),
             last_updated: row.get("last_updated"),
             title: row.get("title"),
-            msg_count,
+            msg_count: count as usize,
         });
     }
 

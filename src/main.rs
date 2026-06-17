@@ -197,6 +197,7 @@ async fn main() -> Result<()> {
         save_session_to_db(&pool, &memory).await;
     }
 
+    println!("Session ID: {}", memory.session_id);
     std::process::exit(0);
 }
 
@@ -354,6 +355,7 @@ async fn save_session_to_db(pool: &sqlx::SqlitePool, mem: &memory::ConversationM
         &mem.title,
         mem.summary(),
         &messages_json,
+        mem.len(),
     )
     .await
     {
@@ -364,6 +366,7 @@ async fn save_session_to_db(pool: &sqlx::SqlitePool, mem: &memory::ConversationM
 /// 保存历史并优雅退出
 async fn save_and_exit(pool: &sqlx::SqlitePool, mem: &memory::ConversationMemory) -> ! {
     save_session_to_db(pool, mem).await;
+    println!("Session ID: {}", mem.session_id);
     ui::print_goodbye(!mem.is_empty());
     std::process::exit(0);
 }
