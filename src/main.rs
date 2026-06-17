@@ -150,22 +150,32 @@ fn build_agent(client: &deepseek::Client) -> rig::agent::Agent<deepseek::Complet
     let effort = config::get_effort_level();
 
     let preamble = format!(
-        r"你是一个专业的程序员助手，可以执行命令和读写文件来帮助用户完成任务。
+        r#"你是一个专业的程序员助手，可以执行命令和读写文件来帮助用户完成任务。
 
         【当前工作目录】
         {}
 
-        【可用工具（仅限以下三种，没有其他工具）】
+        【可用工具】
         - ReadFile：读取指定路径的文件内容，返回带行号的内容
         - WriteFile：覆盖写入指定路径的文件（⚠️ 会覆盖已有内容）
+        - EditFile：精确编辑文件，查找并替换指定文本片段（old_string 必须唯一匹配）
+        - GetFileLines：获取文件总行数，用于评估文件规模
         - ExecuteCommand：执行完整的命令行语句，支持 Windows/Linux/macOS
-        重要提示：没有 Edit 工具。如需修改文件，请用 ReadFile 读取内容，在你的回答中修改，再用 WriteFile 完整覆盖写回。
+
+        【变更策略 ⚠️ 必须遵守】
+        每次修改代码前，必须先在回答中列出变更计划：
+        1. 说明要修改哪些文件
+        2. 每个文件的修改目的和内容概述
+        3. 预估修改步骤数
+
+        修改过程中逐步骤报告进度（如 "✅ 步骤 1/3: 已完成 xxx"）。
+        全部修改完成后，总结实际变更内容。
 
         【注意事项】
         {}
 
         【回答风格】
-        {}",
+        {}"#,
         cwd,
         notes.join("\n"),
         effort.preamble_instruction(),
