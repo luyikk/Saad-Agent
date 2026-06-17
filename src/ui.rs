@@ -523,7 +523,7 @@ fn truncate_str(s: &str, max_width: usize) -> Cow<'_, str> {
     let mut hi = s.len();
 
     while lo < hi {
-        let mid = (lo + hi + 1) / 2;
+        let mid = (lo + hi).div_ceil(2);
         // 确保 mid 落在字符边界
         let safe_mid = find_char_boundary(s, mid);
 

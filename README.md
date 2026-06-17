@@ -13,7 +13,7 @@
 - **四级权限系统** — 本次允许 / 会话全部允许 / 永久允许 / 拒绝，危险操作可精细控制，配置持久化到 TOML
 - **对话记忆压缩** — 超出消息上限时自动调用 AI 摘要，保持长会话上下文连贯
 - **内置工具集**
-  - `RunCmd` — 执行系统命令（Windows PowerShell / Unix sh）
+  - `ExecuteCommand` — 执行系统命令（Windows PowerShell / Unix sh）
   - `ReadFile` — 支持分段、尾部读取
   - `WriteFile` — 覆盖写入文件
   - `EditFile` — 精确字符串替换编辑
@@ -112,7 +112,7 @@ src/
 ├── ui.rs                # 终端渲染：欢迎卡、spinner、StreamDisplay、Token 统计
 └── tool/
     ├── mod.rs           # 工具模块入口
-    ├── cmd.rs           # RunCmd — 系统命令执行
+    ├── cmd.rs           # ExecuteCommand — 系统命令执行
     └── fs.rs            # ReadFile / WriteFile / EditFile / GetFileLines
 ```
 

@@ -29,7 +29,7 @@ stream_handler.rs  Drives the stream → StreamDisplay state machine for CLI ren
 command.rs         Slash-command handlers (/help, /clear, /save, /load, /history, /exit, /effort)
 error.rs           Unified AgentError enum (Io + Other)
 ui.rs              Terminal rendering: welcome card, spinner, StreamDisplay (phase headers, tool calls, token stats)
-tool/cmd.rs        RunCmd tool — executes system commands (PowerShell on Windows, sh on Unix)
+tool/cmd.rs        ExecuteCommand tool — executes system commands (PowerShell on Windows, sh on Unix)
 tool/fs.rs         ReadFile, GetFileLines, WriteFile, EditFile tools — all with path-traversal protection
 ```
 
